@@ -2,8 +2,9 @@ name: backend-ci
 
 on:
   push:
-    branches: ["**"]
+    branches: ["main"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   tests:
@@ -25,9 +26,8 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r multicam_pipeline/requirements.txt -r multicam_pipeline/requirements-dev.txt
+          python -m pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Run tests
         run: |
-          cd multicam_pipeline
           python -m pytest -q tests/test_projects_persistence.py tests/test_pipeline_integration.py
