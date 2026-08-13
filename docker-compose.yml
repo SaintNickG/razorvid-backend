@@ -1,0 +1,103 @@
+version: "3.9"
+
+# =============================================================================
+# Multicam Pipeline — Docker Compose
+#
+# Local dev:
+#   docker-compose up --build
+#
+# Rebuild after dependency changes:
+#   docker-compose up --build --force-recreate
+#
+# Stop and remove containers:
+#   docker-compose down
+#
+# View logs:
+#   docker-compose logs -f api
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Web — Next.js frontend
+  # ---------------------------------------------------------------------------
+  web:
+    image: node:20-alpine
+    container_name: razorvid_web
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../razorvid-web:/app          # live-reload from source
+      - /app/node_modules             # isolate node_modules inside container
+      - /app/.next                    # isolate build cache inside container
+    env_file:
+      - ../razorvid-web/.env.local
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # API — FastAPI + multicam pipeline
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .                  # build from the multicam_pipeline/ directory
+      dockerfile: Dockerfile
+      target: runtime             # use the runtime stage (not builder)
+
+    container_name: multicam_api
+
+    # Load environment variables from .env file.
+    # Copy .env.example → .env and fill in your values before running.
+    env_file:
+      - .env
+
+    ports:
+      - "8000:8000"               # FastAPI → http://localhost:8000
+
+    volumes:
+      # Hot-reload: mount source code so --reload picks up changes instantly
+      # without rebuilding the image on every edit.
+      - .:/app/multicam_pipeline
+
+      # Persist uploaded and rendered files across container restarts.
+      # These map to LOCAL_UPLOAD_DIR and LOCAL_OUTPUT_DIR in config.py.
+      - uploads:/tmp/multicam/uploads
+      - output:/tmp/multicam/output
+
+    # Restart automatically if the container crashes (e.g. OOM from FFmpeg)
+    restart: unless-stopped
+
+    # Docker healthcheck — VS Code Docker extension shows green when healthy.
+    # Mirrors the HEALTHCHECK in the Dockerfile.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+    # Resource limits — FFmpeg is CPU/memory intensive.
+    # Adjust based on your machine. Remove this block if you hit issues locally.
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"             # max 4 CPU cores for FFmpeg rendering
+          memory: 6G              # max 6GB RAM (librosa + FFmpeg buffers)
+        reservations:
+          cpus: "1.0"
+          memory: 512M
+
+# =============================================================================
+# Named volumes — data persists across `docker-compose down` / `up` cycles.
+# Run `docker-compose down -v` to wipe them clean.
+# =============================================================================
+volumes:
+  uploads:
+    driver: local
+  output:
+    driver: local

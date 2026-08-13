@@ -1,0 +1,1441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multicam Pipeline — Upload</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 48px 24px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+
+    header h1 {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: #f8fafc;
+      letter-spacing: -0.5px;
+    }
+
+    header p {
+      margin-top: 8px;
+      color: #94a3b8;
+      font-size: 0.95rem;
+    }
+
+    .card {
+      background: #1e2330;
+      border: 1px solid #2d3748;
+      border-radius: 12px;
+      padding: 32px;
+      width: 100%;
+      max-width: 640px;
+      margin-bottom: 24px;
+    }
+
+    .card h2 {
+      font-size: 1rem;
+      font-weight: 600;
+      color: #cbd5e1;
+      margin-bottom: 20px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    /* Drop zone */
+    #drop-zone {
+      border: 2px dashed #3b4a6b;
+      border-radius: 8px;
+      padding: 40px 24px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+    }
+
+    #drop-zone.dragover {
+      border-color: #6366f1;
+      background: #1a1f35;
+    }
+
+    #drop-zone svg {
+      width: 40px;
+      height: 40px;
+      stroke: #6366f1;
+      margin-bottom: 12px;
+    }
+
+    #drop-zone p {
+      color: #94a3b8;
+      font-size: 0.9rem;
+    }
+
+    #drop-zone span {
+      color: #6366f1;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    #file-input { display: none; }
+
+    /* File list */
+    #file-list {
+      margin-top: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .file-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: #252d3d;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 0.875rem;
+    }
+
+    .file-item svg { stroke: #6366f1; flex-shrink: 0; }
+    .file-item .name { flex: 1; color: #e2e8f0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-item .size { color: #64748b; font-size: 0.8rem; flex-shrink: 0; }
+    .file-item .remove { color: #ef4444; cursor: pointer; font-size: 1rem; flex-shrink: 0; }
+
+    /* Settings */
+    .settings-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 0.85rem;
+      color: #94a3b8;
+    }
+
+    input[type="number"],
+    select {
+      background: #252d3d;
+      border: 1px solid #2d3748;
+      border-radius: 6px;
+      color: #e2e8f0;
+      padding: 8px 12px;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    input[type="number"]:focus,
+    select:focus { border-color: #6366f1; }
+
+    /* Button */
+    #submit-btn {
+      width: 100%;
+      padding: 14px;
+      background: #6366f1;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s, opacity 0.2s;
+      margin-top: 8px;
+    }
+
+    #submit-btn:hover:not(:disabled) { background: #4f46e5; }
+    #submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Status panel */
+    #status-panel { display: none; }
+
+    .status-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+
+    .badge {
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .badge.PENDING    { background: #1e3a5f; color: #60a5fa; }
+    .badge.PROCESSING { background: #3b2f00; color: #fbbf24; }
+    .badge.COMPLETE   { background: #052e16; color: #4ade80; }
+    .badge.FAILED     { background: #3b0a0a; color: #f87171; }
+
+    .progress-bar {
+      height: 4px;
+      background: #2d3748;
+      border-radius: 2px;
+      overflow: hidden;
+      margin-bottom: 16px;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: #6366f1;
+      border-radius: 2px;
+      transition: width 0.4s ease;
+    }
+
+    #job-id-display {
+      font-size: 0.78rem;
+      color: #475569;
+      font-family: monospace;
+      word-break: break-all;
+    }
+
+    #error-box {
+      display: none;
+      background: #3b0a0a;
+      border: 1px solid #7f1d1d;
+      border-radius: 6px;
+      padding: 12px 16px;
+      font-size: 0.85rem;
+      color: #fca5a5;
+      margin-top: 12px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    #download-btn {
+      display: none;
+      width: 100%;
+      padding: 14px;
+      background: #16a34a;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      margin-top: 16px;
+      text-align: center;
+      text-decoration: none;
+    }
+
+    #download-btn:hover { background: #15803d; }
+
+    #reset-btn {
+      width: 100%;
+      padding: 10px;
+      background: transparent;
+      color: #64748b;
+      border: 1px solid #2d3748;
+      border-radius: 8px;
+      font-size: 0.875rem;
+      cursor: pointer;
+      margin-top: 10px;
+      transition: color 0.2s, border-color 0.2s;
+    }
+
+    #reset-btn:hover { color: #e2e8f0; border-color: #475569; }
+
+    .api-link {
+      margin-top: 32px;
+      font-size: 0.82rem;
+      color: #475569;
+      text-align: center;
+    }
+
+    #terms-card {
+      max-width: 640px;
+    }
+
+    #project-card {
+      max-width: 640px;
+    }
+
+    .project-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .project-actions {
+      grid-column: 1 / -1;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 2px;
+    }
+
+    .ghost-btn,
+    .primary-btn {
+      border-radius: 8px;
+      border: 1px solid #334155;
+      cursor: pointer;
+      font-size: 0.86rem;
+      font-weight: 600;
+      padding: 10px 14px;
+    }
+
+    .ghost-btn {
+      color: #dbeafe;
+      background: #172033;
+    }
+
+    .primary-btn {
+      color: #ecfeff;
+      background: #0f766e;
+      border-color: #0f766e;
+    }
+
+    .project-note {
+      margin-top: 10px;
+      font-size: 0.8rem;
+      color: #93c5fd;
+    }
+
+    #project-active-banner {
+      display: none;
+      margin-top: 12px;
+      border: 1px solid #075985;
+      background: #082f49;
+      color: #e0f2fe;
+      border-radius: 8px;
+      padding: 10px;
+      font-size: 0.82rem;
+      line-height: 1.35;
+    }
+
+    #project-invite-panel {
+      display: none;
+      margin-top: 12px;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 12px;
+      background: #0f172a;
+    }
+
+    #project-invite-code {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: #1f2937;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.88rem;
+      color: #bfdbfe;
+    }
+
+    #project-invite-url {
+      margin-top: 8px;
+      font-size: 0.78rem;
+      color: #93c5fd;
+      word-break: break-all;
+    }
+
+    #project-invite-qr {
+      margin-top: 10px;
+      width: 180px;
+      height: 180px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      background: #fff;
+      display: block;
+    }
+
+    .terms-box {
+      border: 1px solid #334155;
+      border-radius: 8px;
+      background: #111827;
+      padding: 14px;
+      font-size: 0.82rem;
+      color: #cbd5e1;
+      line-height: 1.45;
+      max-height: 220px;
+      overflow: auto;
+    }
+
+    .terms-box p {
+      margin-bottom: 10px;
+    }
+
+    .terms-box ul {
+      margin-left: 18px;
+      margin-bottom: 10px;
+    }
+
+    .terms-box li {
+      margin-bottom: 6px;
+    }
+
+    .terms-box a,
+    .terms-consent a {
+      color: #7c9dff;
+      text-decoration: none;
+    }
+
+    .terms-box a:hover,
+    .terms-consent a:hover {
+      text-decoration: underline;
+    }
+
+    .terms-consent {
+      margin-top: 12px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      color: #e2e8f0;
+      font-size: 0.84rem;
+    }
+
+    .terms-consent input[type="checkbox"] {
+      margin-top: 2px;
+      accent-color: #6366f1;
+    }
+
+    .terms-consent + .terms-consent {
+      margin-top: 8px;
+    }
+
+    #sync-resolution-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.72);
+      z-index: 50;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    #sync-resolution-panel {
+      width: 100%;
+      max-width: 620px;
+      background: #111827;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+    }
+
+    #sync-resolution-panel h3 {
+      font-size: 1rem;
+      color: #f8fafc;
+      margin-bottom: 10px;
+    }
+
+    #sync-resolution-details {
+      font-size: 0.82rem;
+      color: #cbd5e1;
+      line-height: 1.4;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 10px;
+      white-space: pre-line;
+      margin-bottom: 12px;
+      max-height: 220px;
+      overflow: auto;
+    }
+
+    .sync-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .sync-actions button {
+      border: 1px solid #334155;
+      background: #1f2937;
+      color: #e5e7eb;
+      padding: 9px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.82rem;
+      font-weight: 600;
+    }
+
+    .sync-actions button.primary {
+      background: #0f766e;
+      border-color: #0f766e;
+      color: #ecfeff;
+    }
+
+    .sync-actions button.danger {
+      background: #7f1d1d;
+      border-color: #7f1d1d;
+      color: #fee2e2;
+    }
+
+    #rekognition-controls {
+      display: none;
+      grid-column: 1 / -1;
+      border: 1px solid #3b4a6b;
+      border-radius: 8px;
+      padding: 12px;
+      background: #1a2233;
+    }
+
+    #cost-estimate-box {
+      display: none;
+      margin-top: 10px;
+      border: 1px solid #374151;
+      border-radius: 8px;
+      padding: 10px;
+      background: #1f2937;
+      font-size: 0.82rem;
+      color: #cbd5e1;
+      line-height: 1.35;
+      white-space: pre-line;
+    }
+
+    .api-link a { color: #6366f1; text-decoration: none; }
+    .api-link a:hover { text-decoration: underline; }
+
+    @media (max-width: 700px) {
+      .project-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>🎬 Multicam Pipeline</h1>
+    <p>Upload multi-angle videos — sync, cut, and render automatically.</p>
+  </header>
+
+  <div class="card" id="project-card">
+    <h2>1 — Project Invite</h2>
+    <div class="project-grid">
+      <label>
+        Project Name
+        <input type="text" id="project-name" placeholder="Friday Night Game - Field South" />
+      </label>
+      <label>
+        Owner ID
+        <input type="text" id="project-owner-id" placeholder="coach-kim" />
+      </label>
+      <div class="project-actions">
+        <button id="create-project-btn" class="primary-btn" type="button">Create Project & Generate QR</button>
+        <button id="copy-invite-btn" class="ghost-btn" type="button">Copy Invite Link</button>
+      </div>
+    </div>
+    <p class="project-note">
+      Owners can share this QR with additional videographers. Anyone scanning it can join and add an angle.
+    </p>
+
+    <div id="project-active-banner"></div>
+
+    <div id="project-invite-panel">
+      <div style="font-size:0.82rem; color:#cbd5e1;">Invite Code</div>
+      <div id="project-invite-code">-</div>
+      <div id="project-invite-url">-</div>
+      <img id="project-invite-qr" alt="Project invite QR code" />
+    </div>
+  </div>
+
+  <!-- Upload card -->
+  <div class="card" id="upload-card">
+    <h2>2 — Select Videos</h2>
+
+    <div id="drop-zone">
+      <svg viewBox="0 0 24 24" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/>
+      </svg>
+      <p>Drag & drop video files here, or <span id="browse-link">browse</span></p>
+      <p style="margin-top:6px; font-size:0.8rem; color:#475569;">MP4, MOV, AVI, MKV, WEBM — minimum 2 angles required</p>
+    </div>
+    <input type="file" id="file-input" multiple accept=".mp4,.mov,.avi,.mkv,.webm" />
+    <div id="file-list"></div>
+  </div>
+
+  <!-- Settings card -->
+  <div class="card">
+    <h2>3 — Render Settings</h2>
+    <div class="settings-grid">
+      <label>
+        Cutting Mode
+        <select id="cutting-strategy">
+          <option value="local" selected>Local AI (free)</option>
+          <option value="rekognition">Amazon Rekognition (cloud)</option>
+          <option value="interval">Fixed Interval</option>
+        </select>
+      </label>
+      <label>
+        Event Profile
+        <select id="event-type">
+          <option value="cheer" selected>Cheer</option>
+          <option value="sport">Sport</option>
+          <option value="concert">Concert</option>
+        </select>
+      </label>
+      <label>
+        Effects Intensity
+        <select id="effect-intensity">
+          <option value="subtle">Subtle</option>
+          <option value="balanced" selected>Balanced</option>
+          <option value="cinematic">Cinematic</option>
+        </select>
+      </label>
+      <label>
+        Cut Interval (seconds)
+        <input type="number" id="cut-interval" value="5" min="1" max="60" step="0.5" />
+      </label>
+      <label>
+        Frame Rate (fps)
+        <input type="number" id="target-fps" value="30" min="24" max="60" step="1" />
+      </label>
+      <label>
+        Width (px)
+        <input type="number" id="target-width" value="1920" min="640" max="3840" step="1" />
+      </label>
+      <label>
+        Height (px)
+        <input type="number" id="target-height" value="1080" min="360" max="2160" step="1" />
+      </label>
+      <label style="grid-column: 1 / -1;">
+        Master Audio Source
+        <select id="audio-source-select">
+          <option value="auto">Auto-select best audio (recommended)</option>
+        </select>
+        <span style="margin-top:4px; font-size:0.78rem; color:#64748b;">
+          Override to force one uploaded video as the main audio track.
+        </span>
+      </label>
+
+      <div id="rekognition-controls">
+        <label>
+          Rekognition Sample Rate (analyze every Nth frame)
+          <input type="number" id="rekognition-sample-rate" value="15" min="1" max="60" step="1" />
+        </label>
+        <div id="cost-estimate-box"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="terms-card">
+    <h2>4 — Terms & Safety</h2>
+    <div class="terms-box">
+      <p>
+        This app is intended for lawful peer sharing and collaborative editing of videos.
+        By submitting files, you confirm that you understand and agree to the following,
+        plus the full <a href="/static/terms.html" target="_blank" rel="noopener noreferrer">Terms of Use</a>
+        and <a href="/static/privacy.html" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.
+      </p>
+      <ul>
+        <li>You own the content you upload, or you have permission and licenses to use and share it.</li>
+        <li>You have consent from people shown or heard in the video when consent is legally required.</li>
+        <li>You will not upload illegal, abusive, hateful, sexually explicit, or violent content.</li>
+        <li>You will not upload copyrighted music or media unless you are licensed to do so.</li>
+        <li>You understand uploads may be processed by automated systems to sync audio and render output.</li>
+        <li>You will not upload highly sensitive personal data unless you are authorized and it is necessary.</li>
+        <li>You accept responsibility for your use of rendered outputs and any sharing of generated files.</li>
+      </ul>
+      <p>
+        Service notice: rendering and downloads are provided as-is. Processing failures, queue delays,
+        or quality differences may occur depending on source media.
+      </p>
+    </div>
+    <label class="terms-consent">
+      <input type="checkbox" id="terms-accept" />
+      <span>
+        I agree to the <a href="/static/terms.html" target="_blank" rel="noopener noreferrer">Terms of Use</a>
+        and acknowledge the <a href="/static/privacy.html" target="_blank" rel="noopener noreferrer">Privacy Policy</a>.
+      </span>
+    </label>
+    <label class="terms-consent">
+      <input type="checkbox" id="uploader-authority-accept" />
+      <span>
+        I confirm I am authorized to upload and process this media for myself, my team, or my organization.
+      </span>
+    </label>
+  </div>
+
+  <!-- Submit -->
+  <div class="card" style="padding-top: 0; border: none; background: transparent;">
+    <button id="submit-btn" disabled>Upload &amp; Render</button>
+  </div>
+
+  <!-- Status panel -->
+  <div class="card" id="status-panel">
+    <h2>5 — Job Status</h2>
+
+    <div class="status-row">
+      <span id="status-badge" class="badge PENDING">Pending</span>
+      <span id="job-id-display"></span>
+    </div>
+
+    <div class="progress-bar">
+      <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+    </div>
+
+    <p id="status-message" style="font-size: 0.875rem; color: #94a3b8;"></p>
+    <p id="audio-master-display" style="font-size: 0.82rem; color: #64748b; margin-top: 8px;"></p>
+
+    <div id="error-box"></div>
+
+    <a id="download-btn" href="#" download>⬇ Download Multicam MP4</a>
+    <button id="reset-btn" style="display:none;">Start New Job</button>
+  </div>
+
+  <p class="api-link">
+    Dev tools: <a href="/docs" target="_blank">Swagger UI</a> &nbsp;·&nbsp;
+    <a href="/redoc" target="_blank">ReDoc</a> &nbsp;·&nbsp;
+    <a href="/health" target="_blank">Health Check</a>
+    <br />
+    Policies: <a href="/static/terms.html" target="_blank">Terms of Use</a> &nbsp;·&nbsp;
+    <a href="/static/privacy.html" target="_blank">Privacy Policy</a>
+  </p>
+
+  <div id="sync-resolution-modal">
+    <div id="sync-resolution-panel">
+      <h3>Audio Sync Mismatch Detected</h3>
+      <div id="sync-resolution-details"></div>
+      <div class="sync-actions">
+        <button id="sync-drop-retry-btn" class="primary">Drop Unsynced Videos & Retry</button>
+        <button id="sync-keep-btn">Keep All Videos</button>
+        <button id="sync-cancel-btn" class="danger">Cancel Project</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ---------------------------------------------------------------------------
+    // State
+    // ---------------------------------------------------------------------------
+    let selectedFiles = [];
+    let selectedDurations = [];
+    let pollInterval  = null;
+    let lastUploadId = null;
+    let lastUploadedRefs = [];
+    let pendingMismatchPaths = [];
+    let activeProject = null;
+    let viewerUserId = null;
+    let pendingInviteCode = null;
+    let inviteJoinInFlight = false;
+    let inviteJoinDone = false;
+
+    const API = '';  // same origin — change to 'http://localhost:8000' if serving separately
+
+    // ---------------------------------------------------------------------------
+    // DOM refs
+    // ---------------------------------------------------------------------------
+    const dropZone      = document.getElementById('drop-zone');
+    const fileInput     = document.getElementById('file-input');
+    const browseLink    = document.getElementById('browse-link');
+    const fileList      = document.getElementById('file-list');
+    const projectNameInput = document.getElementById('project-name');
+    const projectOwnerInput = document.getElementById('project-owner-id');
+    const createProjectBtn = document.getElementById('create-project-btn');
+    const copyInviteBtn = document.getElementById('copy-invite-btn');
+    const projectInvitePanel = document.getElementById('project-invite-panel');
+    const projectInviteCode = document.getElementById('project-invite-code');
+    const projectInviteUrl = document.getElementById('project-invite-url');
+    const projectInviteQr = document.getElementById('project-invite-qr');
+    const projectActiveBanner = document.getElementById('project-active-banner');
+    const submitBtn     = document.getElementById('submit-btn');
+    const cuttingStrategySelect = document.getElementById('cutting-strategy');
+    const eventTypeSelect = document.getElementById('event-type');
+    const effectIntensitySelect = document.getElementById('effect-intensity');
+    const audioSourceSelect = document.getElementById('audio-source-select');
+    const termsAccept = document.getElementById('terms-accept');
+    const uploaderAuthorityAccept = document.getElementById('uploader-authority-accept');
+    const rekognitionControls = document.getElementById('rekognition-controls');
+    const rekognitionSampleRateInput = document.getElementById('rekognition-sample-rate');
+    const costEstimateBox = document.getElementById('cost-estimate-box');
+    const statusPanel   = document.getElementById('status-panel');
+    const statusBadge   = document.getElementById('status-badge');
+    const statusMessage = document.getElementById('status-message');
+    const audioMasterDisplay = document.getElementById('audio-master-display');
+    const progressFill  = document.getElementById('progress-fill');
+    const jobIdDisplay  = document.getElementById('job-id-display');
+    const errorBox      = document.getElementById('error-box');
+    const downloadBtn   = document.getElementById('download-btn');
+    const resetBtn      = document.getElementById('reset-btn');
+    const syncResolutionModal = document.getElementById('sync-resolution-modal');
+    const syncResolutionDetails = document.getElementById('sync-resolution-details');
+    const syncDropRetryBtn = document.getElementById('sync-drop-retry-btn');
+    const syncKeepBtn = document.getElementById('sync-keep-btn');
+    const syncCancelBtn = document.getElementById('sync-cancel-btn');
+
+    // ---------------------------------------------------------------------------
+    // File selection
+    // ---------------------------------------------------------------------------
+    browseLink.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => addFiles(Array.from(fileInput.files)));
+    createProjectBtn.addEventListener('click', createProjectAndInvite);
+    copyInviteBtn.addEventListener('click', copyInviteLink);
+    cuttingStrategySelect.addEventListener('change', syncModeControls);
+    document.getElementById('target-fps').addEventListener('change', updateRekognitionEstimate);
+    rekognitionSampleRateInput.addEventListener('change', updateRekognitionEstimate);
+    termsAccept.addEventListener('change', updateSubmitState);
+    uploaderAuthorityAccept.addEventListener('change', updateSubmitState);
+    syncDropRetryBtn.addEventListener('click', handleDropAndRetry);
+    syncKeepBtn.addEventListener('click', hideSyncResolutionModal);
+    syncCancelBtn.addEventListener('click', () => {
+      hideSyncResolutionModal();
+      resetProjectState();
+    });
+
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+      addFiles(Array.from(e.dataTransfer.files));
+    });
+
+    function ensureViewerUserId() {
+      const key = 'multicam_viewer_user_id';
+      const existing = localStorage.getItem(key);
+      if (existing && existing.trim()) {
+        viewerUserId = existing.trim();
+      } else {
+        const generated = (window.crypto && window.crypto.randomUUID)
+          ? window.crypto.randomUUID()
+          : `viewer-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+        viewerUserId = generated;
+        localStorage.setItem(key, generated);
+      }
+
+      if (!projectOwnerInput.value) {
+        projectOwnerInput.value = viewerUserId;
+      }
+    }
+
+    function setActiveProject(project, roleLabel) {
+      activeProject = project;
+      projectActiveBanner.style.display = 'block';
+      projectActiveBanner.textContent =
+        `${roleLabel} project: ${project.name} | ID: ${project.project_id} | Invite: ${project.invite_code}`;
+    }
+
+    async function createProjectAndInvite() {
+      const ownerId = (projectOwnerInput.value || '').trim() || viewerUserId;
+      const name = (projectNameInput.value || '').trim();
+      if (!name) {
+        showError('Enter a project name before generating an invite QR.');
+        return;
+      }
+
+      try {
+        errorBox.style.display = 'none';
+        createProjectBtn.disabled = true;
+        createProjectBtn.textContent = 'Creating project...';
+
+        const createRes = await fetch(`${API}/projects`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name,
+            owner_id: ownerId,
+            event_type: eventTypeSelect.value || 'cheer',
+          }),
+        });
+
+        if (!createRes.ok) {
+          const err = await createRes.json();
+          throw new Error(err.detail || 'Project creation failed.');
+        }
+
+        const project = await createRes.json();
+        setActiveProject(project, 'Owner');
+
+        projectInviteCode.textContent = project.invite_code;
+        projectInviteUrl.textContent = project.invite_url;
+        projectInviteQr.src = `${API}/projects/${project.project_id}/invite-qr?owner_id=${encodeURIComponent(ownerId)}`;
+        projectInvitePanel.style.display = 'block';
+      } catch (err) {
+        showError(err.message || 'Could not create project invite.');
+      } finally {
+        createProjectBtn.disabled = false;
+        createProjectBtn.textContent = 'Create Project & Generate QR';
+      }
+    }
+
+    async function copyInviteLink() {
+      if (!activeProject || !activeProject.invite_url) {
+        showError('Create a project first to copy an invite link.');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(activeProject.invite_url);
+        projectActiveBanner.style.display = 'block';
+        projectActiveBanner.textContent = `Invite link copied for project ${activeProject.name}.`;
+      } catch {
+        showError('Could not copy invite link from this browser session.');
+      }
+    }
+
+    async function joinProjectFromUrlInvite() {
+      const params = new URLSearchParams(window.location.search);
+      const inviteCode = (params.get('invite') || '').trim();
+      if (!inviteCode) return;
+
+      pendingInviteCode = inviteCode;
+      projectActiveBanner.style.display = 'block';
+      projectActiveBanner.textContent =
+        `Invite detected (${inviteCode}). Accept Terms & Safety to join this project.`;
+
+      try {
+        const infoRes = await fetch(`${API}/projects/invite/${encodeURIComponent(inviteCode)}`);
+        if (!infoRes.ok) return;
+        const project = await infoRes.json();
+        projectNameInput.value = project.name || projectNameInput.value;
+      } catch {
+        // Ignore initial invite-resolution failures.
+      }
+
+      maybeJoinPendingInvite();
+    }
+
+    async function maybeJoinPendingInvite() {
+      if (!pendingInviteCode || inviteJoinDone || inviteJoinInFlight) return;
+      if (!termsAccept.checked || !uploaderAuthorityAccept.checked) return;
+
+      try {
+        inviteJoinInFlight = true;
+        const joinRes = await fetch(`${API}/projects/join`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            invite_code: pendingInviteCode,
+            user_id: viewerUserId,
+          }),
+        });
+
+        if (joinRes.ok) {
+          const joinedProject = await joinRes.json();
+          setActiveProject(joinedProject, 'Joined');
+          inviteJoinDone = true;
+          pendingInviteCode = null;
+        } else {
+          const err = await joinRes.json().catch(() => ({}));
+          showError(err.detail || 'Invite join failed after terms acceptance.');
+        }
+      } catch {
+        showError('Invite join failed. Please retry by reopening the invite link.');
+      } finally {
+        inviteJoinInFlight = false;
+      }
+    }
+
+    async function registerUploadWithProject(uploadData) {
+      if (!activeProject || !activeProject.project_id) return;
+
+      const regRes = await fetch(`${API}/projects/${activeProject.project_id}/uploads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          upload_id: uploadData.upload_id,
+          user_id: viewerUserId,
+          files: uploadData.files,
+        }),
+      });
+
+      if (!regRes.ok) {
+        const err = await regRes.json().catch(() => ({}));
+        throw new Error(err.detail || 'Project upload registration failed.');
+      }
+    }
+
+    function addFiles(files) {
+      files.forEach(f => {
+        if (!selectedFiles.find(x => x.name === f.name && x.size === f.size)) {
+          selectedFiles.push(f);
+        }
+      });
+      renderFileList();
+      refreshDurationsAndEstimate();
+    }
+
+    function removeFile(index) {
+      selectedFiles.splice(index, 1);
+      renderFileList();
+      refreshDurationsAndEstimate();
+    }
+
+    async function getVideoDurationSeconds(file) {
+      return new Promise((resolve) => {
+        const video = document.createElement('video');
+        const url = URL.createObjectURL(file);
+        const cleanup = () => {
+          URL.revokeObjectURL(url);
+          video.remove();
+        };
+
+        const timeout = setTimeout(() => {
+          cleanup();
+          resolve(null);
+        }, 6000);
+
+        video.preload = 'metadata';
+        video.onloadedmetadata = () => {
+          clearTimeout(timeout);
+          const dur = Number(video.duration);
+          cleanup();
+          resolve(Number.isFinite(dur) && dur > 0 ? dur : null);
+        };
+        video.onerror = () => {
+          clearTimeout(timeout);
+          cleanup();
+          resolve(null);
+        };
+        video.src = url;
+      });
+    }
+
+    async function refreshDurationsAndEstimate() {
+      if (!selectedFiles.length) {
+        selectedDurations = [];
+        updateRekognitionEstimate();
+        return;
+      }
+
+      selectedDurations = await Promise.all(selectedFiles.map(getVideoDurationSeconds));
+      updateRekognitionEstimate();
+    }
+
+    function syncModeControls() {
+      const isRekognition = cuttingStrategySelect.value === 'rekognition';
+      rekognitionControls.style.display = isRekognition ? 'block' : 'none';
+      document.getElementById('cut-interval').disabled = cuttingStrategySelect.value !== 'interval';
+      updateRekognitionEstimate();
+    }
+
+    async function updateRekognitionEstimate() {
+      if (cuttingStrategySelect.value !== 'rekognition') {
+        costEstimateBox.style.display = 'none';
+        return;
+      }
+
+      if (selectedFiles.length < 2) {
+        costEstimateBox.style.display = 'block';
+        costEstimateBox.textContent = 'Select at least 2 videos to estimate Rekognition cost.';
+        return;
+      }
+
+      const maxDuration = Math.max(...selectedDurations.filter(d => Number.isFinite(d) && d > 0), 0);
+      if (!maxDuration) {
+        costEstimateBox.style.display = 'block';
+        costEstimateBox.textContent = 'Reading video durations for cost estimate...';
+        return;
+      }
+
+      try {
+        const payload = {
+          video_duration_seconds: maxDuration,
+          fps: parseFloat(document.getElementById('target-fps').value) || 30,
+          sample_rate: parseInt(rekognitionSampleRateInput.value) || 15,
+          num_angles: selectedFiles.length,
+        };
+
+        const res = await fetch(`${API}/cost-estimate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error('Failed to estimate cost');
+
+        const est = await res.json();
+        costEstimateBox.style.display = 'block';
+        costEstimateBox.textContent =
+          `Estimated Rekognition cost: $${Number(est.estimated_cost).toFixed(4)}\n` +
+          `Sampled frames: ${est.sampled_frames}\n` +
+          `API calls: ${est.total_api_calls}`;
+      } catch {
+        costEstimateBox.style.display = 'block';
+        costEstimateBox.textContent = 'Could not fetch cost estimate right now.';
+      }
+    }
+
+    function formatBytes(bytes) {
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    function renderFileList() {
+      fileList.innerHTML = '';
+      selectedFiles.forEach((f, i) => {
+        const item = document.createElement('div');
+        item.className = 'file-item';
+        item.innerHTML = `
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V7z"/><polyline points="14 2 14 8 20 8"/>
+          </svg>
+          <span class="name">${f.name}</span>
+          <span class="size">${formatBytes(f.size)}</span>
+          <span class="remove" data-index="${i}" title="Remove">✕</span>
+        `;
+        fileList.appendChild(item);
+      });
+
+      // Remove button handlers
+      fileList.querySelectorAll('.remove').forEach(btn => {
+        btn.addEventListener('click', () => removeFile(parseInt(btn.dataset.index)));
+      });
+
+      updateSubmitState();
+
+      renderAudioSourceOptions();
+    }
+
+    function updateSubmitState() {
+      const enoughFiles = selectedFiles.length >= 2;
+      const acceptedTerms = Boolean(termsAccept?.checked);
+      const acceptedAuthority = Boolean(uploaderAuthorityAccept?.checked);
+      submitBtn.disabled = !(enoughFiles && acceptedTerms && acceptedAuthority);
+      submitBtn.textContent = enoughFiles
+        ? `Upload & Render (${selectedFiles.length} angles)`
+        : 'Upload & Render';
+
+      maybeJoinPendingInvite();
+    }
+
+    function renderAudioSourceOptions() {
+      const previousValue = audioSourceSelect.value || 'auto';
+      audioSourceSelect.innerHTML = '';
+
+      const autoOption = document.createElement('option');
+      autoOption.value = 'auto';
+      autoOption.textContent = 'Auto-select best audio (recommended)';
+      audioSourceSelect.appendChild(autoOption);
+
+      selectedFiles.forEach((file, index) => {
+        const option = document.createElement('option');
+        option.value = String(index);
+        option.textContent = `Use: ${file.name}`;
+        audioSourceSelect.appendChild(option);
+      });
+
+      if (previousValue !== 'auto' && Number(previousValue) < selectedFiles.length) {
+        audioSourceSelect.value = previousValue;
+      } else {
+        audioSourceSelect.value = 'auto';
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Submit — upload then render
+    // ---------------------------------------------------------------------------
+    submitBtn.addEventListener('click', async () => {
+      if (!termsAccept.checked || !uploaderAuthorityAccept.checked) {
+        showError('Please accept Terms & Safety and confirm uploader authority before submitting a render job.');
+        updateSubmitState();
+        return;
+      }
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Uploading…';
+      errorBox.style.display = 'none';
+
+      try {
+        // Step 1: Upload files
+        const formData = new FormData();
+        selectedFiles.forEach(f => formData.append('files', f));
+
+        const uploadRes = await fetch(`${API}/upload`, { method: 'POST', body: formData });
+        if (!uploadRes.ok) {
+          const err = await uploadRes.json();
+          throw new Error(err.detail || 'Upload failed.');
+        }
+        const uploadData = await uploadRes.json();
+        lastUploadId = uploadData.upload_id;
+        lastUploadedRefs = [...uploadData.files];
+
+        if (activeProject?.project_id) {
+          try {
+            await registerUploadWithProject(uploadData);
+          } catch {
+            showError('Upload succeeded, but project angle registration failed. Render can still continue.');
+          }
+        }
+
+        // Step 2: Submit render job
+        submitBtn.textContent = 'Submitting job…';
+        const payload = buildRenderPayload(uploadData.files, uploadData.upload_id);
+        const jobData = await submitRenderRequest(payload);
+        startPolling(jobData.job_id);
+
+      } catch (err) {
+        showError(err.message);
+        updateSubmitState();
+      }
+    });
+
+    // ---------------------------------------------------------------------------
+    // Status polling
+    // ---------------------------------------------------------------------------
+    const STATUS_MESSAGES = {
+      PENDING:    'Job queued — waiting for a worker…',
+      PROCESSING: 'Pipeline running — syncing audio and rendering…',
+      COMPLETE:   'Render complete! Your multicam video is ready.',
+      FAILED:     'Job failed. See error details below.',
+    };
+
+    const PROGRESS = { PENDING: 10, PROCESSING: 60, COMPLETE: 100, FAILED: 100 };
+
+    function startPolling(jobId) {
+      statusPanel.style.display = 'block';
+      jobIdDisplay.textContent  = `Job ID: ${jobId}`;
+      updateStatus('PENDING', null);
+      hideSyncResolutionModal();
+
+      // Scroll to status panel
+      statusPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+      pollInterval = setInterval(async () => {
+        try {
+          const res  = await fetch(`${API}/status/${jobId}`);
+          const data = await res.json();
+          updateStatus(data.status, data.audio_master_source || null);
+
+          if (data.status === 'COMPLETE') {
+            clearInterval(pollInterval);
+            showDownload(jobId);
+          }
+
+          if (data.status === 'FAILED') {
+            clearInterval(pollInterval);
+            maybeShowAudioMismatchPopup(data.error || '');
+            showError(data.error || 'Unknown error.');
+            resetBtn.style.display = 'block';
+            updateSubmitState();
+          }
+        } catch (e) {
+          // Network hiccup — keep polling
+        }
+      }, 3000); // poll every 3 seconds
+    }
+
+    function updateStatus(status, audioMasterSource) {
+      statusBadge.textContent  = status;
+      statusBadge.className    = `badge ${status}`;
+      statusMessage.textContent = STATUS_MESSAGES[status] || status;
+      progressFill.style.width  = `${PROGRESS[status] || 0}%`;
+
+      if (audioMasterSource) {
+        const label = audioMasterSource.split('/').pop() || audioMasterSource;
+        audioMasterDisplay.textContent = `Master audio source: ${label}`;
+      } else {
+        audioMasterDisplay.textContent = '';
+      }
+    }
+
+    function showDownload(jobId) {
+      downloadBtn.href          = `${API}/download/${jobId}`;
+      downloadBtn.style.display = 'block';
+      resetBtn.style.display    = 'block';
+    }
+
+    function showError(message) {
+      errorBox.textContent    = message;
+      errorBox.style.display  = 'block';
+    }
+
+    function hideSyncResolutionModal() {
+      syncResolutionModal.style.display = 'none';
+      pendingMismatchPaths = [];
+    }
+
+    function showSyncResolutionModal(message, mismatchPaths) {
+      pendingMismatchPaths = mismatchPaths;
+      syncResolutionDetails.textContent = message;
+      syncResolutionModal.style.display = 'flex';
+    }
+
+    function parseMismatchPaths(message) {
+      const lines = message.split('\n');
+      const extracted = [];
+      for (const line of lines) {
+        const m = line.match(/^\-\s(.+?)\s\|/);
+        if (m && m[1]) extracted.push(m[1].trim());
+      }
+      return extracted;
+    }
+
+    function buildRenderPayload(fileRefs, uploadId) {
+      const payload = {
+        files: fileRefs,
+        upload_id: uploadId,
+        cut_interval: parseFloat(document.getElementById('cut-interval').value),
+        target_fps: parseInt(document.getElementById('target-fps').value),
+        target_width: parseInt(document.getElementById('target-width').value),
+        target_height: parseInt(document.getElementById('target-height').value),
+        cutting_strategy: cuttingStrategySelect.value,
+        event_type: eventTypeSelect.value,
+        effect_intensity: effectIntensitySelect.value,
+        rekognition_sample_rate: parseInt(rekognitionSampleRateInput.value) || 15,
+      };
+
+      if (activeProject?.project_id) {
+        payload.project_id = activeProject.project_id;
+      }
+
+      if (audioSourceSelect.value !== 'auto') {
+        const pickedIndex = Number(audioSourceSelect.value);
+        if (!Number.isNaN(pickedIndex) && fileRefs[pickedIndex]) {
+          payload.audio_source_file = fileRefs[pickedIndex];
+        }
+      }
+
+      return payload;
+    }
+
+    async function submitRenderRequest(payload) {
+      const renderRes = await fetch(`${API}/render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (!renderRes.ok) {
+        const err = await renderRes.json();
+        throw new Error(err.detail || 'Render submission failed.');
+      }
+      return renderRes.json();
+    }
+
+    async function handleDropAndRetry() {
+      const mismatchPaths = [...pendingMismatchPaths];
+      hideSyncResolutionModal();
+
+      if (!lastUploadId || !lastUploadedRefs.length || !mismatchPaths.length) {
+        showError('Could not resolve mismatch list for automatic retry.');
+        return;
+      }
+
+      const mismatchBases = new Set(
+        mismatchPaths.map(p => (p.split('/').pop() || '').trim()).filter(Boolean)
+      );
+
+      const dropIndexes = [];
+      for (let i = 0; i < lastUploadedRefs.length; i += 1) {
+        const ref = lastUploadedRefs[i];
+        const base = ref.split('/').pop() || '';
+        if (mismatchPaths.includes(ref) || mismatchBases.has(base)) {
+          dropIndexes.push(i);
+        }
+      }
+
+      if (!dropIndexes.length) {
+        showError('No matching uploaded video references found to drop.');
+        return;
+      }
+
+      const keepSet = new Set(dropIndexes);
+      const keptRefs = lastUploadedRefs.filter((_, i) => !keepSet.has(i));
+      const keptFiles = selectedFiles.filter((_, i) => !keepSet.has(i));
+      const keptDurations = selectedDurations.filter((_, i) => !keepSet.has(i));
+
+      if (keptRefs.length < 2) {
+        showError('Cannot retry: dropping unsynced videos would leave fewer than 2 angles.');
+        return;
+      }
+
+      selectedFiles = keptFiles;
+      selectedDurations = keptDurations;
+      lastUploadedRefs = keptRefs;
+      renderFileList();
+      await updateRekognitionEstimate();
+
+      try {
+        errorBox.style.display = 'none';
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Retrying with synced subset…';
+        const payload = buildRenderPayload(keptRefs, lastUploadId);
+        const jobData = await submitRenderRequest(payload);
+        startPolling(jobData.job_id);
+      } catch (err) {
+        showError(err.message || 'Retry failed.');
+        updateSubmitState();
+      }
+    }
+
+    function maybeShowAudioMismatchPopup(message) {
+      if (!message || !message.includes('AUDIO_MATCH_FAILED')) return;
+
+      const cleaned = message
+        .replace('AUDIO_MATCH_FAILED:', 'Audio synchronization issue detected:')
+        .replace(/\s*Tip:/, '\n\nTip:');
+
+      const mismatchPaths = parseMismatchPaths(message);
+      showSyncResolutionModal(cleaned, mismatchPaths);
+    }
+
+    function resetProjectState() {
+      clearInterval(pollInterval);
+      selectedFiles       = [];
+      selectedDurations   = [];
+      lastUploadId        = null;
+      lastUploadedRefs    = [];
+      pendingMismatchPaths = [];
+      activeProject       = null;
+      pendingInviteCode   = null;
+      inviteJoinInFlight  = false;
+      inviteJoinDone      = false;
+      fileList.innerHTML  = '';
+      submitBtn.disabled  = true;
+      submitBtn.textContent = 'Upload & Render';
+      statusPanel.style.display  = 'none';
+      downloadBtn.style.display  = 'none';
+      resetBtn.style.display     = 'none';
+      errorBox.style.display     = 'none';
+      audioMasterDisplay.textContent = '';
+      progressFill.style.width   = '0%';
+      fileInput.value            = '';
+      projectNameInput.value     = '';
+      projectOwnerInput.value    = viewerUserId || '';
+      projectInvitePanel.style.display = 'none';
+      projectInviteCode.textContent = '-';
+      projectInviteUrl.textContent = '-';
+      projectInviteQr.removeAttribute('src');
+      projectActiveBanner.style.display = 'none';
+      projectActiveBanner.textContent = '';
+      cuttingStrategySelect.value = 'local';
+      eventTypeSelect.value = 'cheer';
+      effectIntensitySelect.value = 'balanced';
+      termsAccept.checked = false;
+      uploaderAuthorityAccept.checked = false;
+      rekognitionSampleRateInput.value = '15';
+      costEstimateBox.style.display = 'none';
+      audioSourceSelect.value    = 'auto';
+      syncModeControls();
+      updateSubmitState();
+      hideSyncResolutionModal();
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    // ---------------------------------------------------------------------------
+    // Reset
+    // ---------------------------------------------------------------------------
+    resetBtn.addEventListener('click', () => {
+      resetProjectState();
+    });
+
+    // Initialize mode-specific UI state.
+    ensureViewerUserId();
+    joinProjectFromUrlInvite();
+    syncModeControls();
+    updateSubmitState();
+  </script>
+</body>
+</html>

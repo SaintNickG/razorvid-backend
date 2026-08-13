@@ -1,0 +1,6 @@
+test_id,scenario,input_summary,expected_outcome,actual_outcome,status,job_id,render_seconds,output_path,error_message,notes
+T01,2-camera happy path,"2 clips, both with audio","Job COMPLETE, playable output, interval switching",,PENDING,,,,,
+T02,3-camera staggered starts,"3 clips, staggered starts","Offset-aware valid angle selection, no black gaps",,PENDING,,,,,
+T03,mismatched clip lengths,"45s/30s/18s clips","Short angles drop out gracefully, job COMPLETE",,PENDING,,,,,
+T04,no-audio edge case,"1 clip with audio + 1 clip without audio","Fast fail with explicit audio-required error",,PENDING,,,,,
+T05,noisy audio tolerance,"2 noisy clips","Job COMPLETE with acceptable sync quality",,PENDING,,,,,

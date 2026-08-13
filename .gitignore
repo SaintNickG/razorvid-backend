@@ -1,0 +1,19 @@
+# Local environment files
+.env
+.env.*
+cognito.env
+
+# Local runtime artifacts
+/tmp/
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python cache artifacts
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# macOS files
+.DS_Store
