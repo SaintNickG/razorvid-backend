@@ -73,6 +73,7 @@ class MulticamJob:
     cutting_strategy:         CuttingStrategy = CuttingStrategy.LOCAL
     event_type:               EventType       = EventType.CHEER
     effect_intensity:         EffectIntensity = EffectIntensity.BALANCED
+    transition_style:         str             = "cut"
     rekognition_sample_rate:  int             = 15
     audio_source_override:    Optional[str]   = None
     selected_audio_source_path: Optional[str] = None
@@ -101,6 +102,7 @@ class MulticamJob:
             "cutting_strategy":        self.cutting_strategy.value,
             "event_type":              self.event_type.value,
             "effect_intensity":        self.effect_intensity.value,
+            "transition_style":        self.transition_style,
             "rekognition_sample_rate": self.rekognition_sample_rate,
             "audio_source_override":   self.audio_source_override,
             "selected_audio_source_path": self.selected_audio_source_path,
@@ -126,6 +128,7 @@ class MulticamJob:
             cutting_strategy         = CuttingStrategy(data.get("cutting_strategy", "local")),
             event_type               = EventType(data.get("event_type", "cheer")),
             effect_intensity         = EffectIntensity(data.get("effect_intensity", "balanced")),
+            transition_style         = data.get("transition_style", "cut"),
             rekognition_sample_rate  = int(data.get("rekognition_sample_rate", 15)),
             audio_source_override     = data.get("audio_source_override"),
             selected_audio_source_path = data.get("selected_audio_source_path"),

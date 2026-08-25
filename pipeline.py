@@ -98,6 +98,7 @@ def run_multicam_job(job: MulticamJob) -> str:
         target_fps=job.target_fps,
         event_profile=job.event_type.value,
         effect_intensity=job.effect_intensity.value,
+        transition_style=job.transition_style,
         audio_source_path=reference_audio_path,
         audio_source_offset=offsets.get(reference_audio_path, 0.0),
         audio_source_duration=durations.get(reference_audio_path),

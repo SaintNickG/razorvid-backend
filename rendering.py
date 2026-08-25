@@ -257,6 +257,8 @@ def _build_filtergraph(
 
     def _themed_chain(theme_name: str) -> str:
         # Keep effects duration-neutral so concat timing remains stable.
+        if theme_name == "dissolve":
+            return "fade=t=in:st=0:d=0.18"
         if theme_name == "whip_blur":
             return "tmix=frames=3:weights='1 2 1',unsharp=5:5:0.5:5:5:0.0,eq=contrast=1.10:saturation=1.12"
         if theme_name == "flash_punch":
@@ -472,6 +474,7 @@ def render(
     encoder: Optional[str] = None,
     event_profile: str = "balanced",
     effect_intensity: str = "balanced",
+    transition_style: str = "cut",
     audio_source_path: Optional[str] = None,
     audio_source_offset: float = 0.0,
     audio_source_duration: Optional[float] = None,
@@ -518,6 +521,7 @@ def render(
         segments,
         event_profile,
         effect_intensity,
+        transition_style,
     )
 
     # Step 1: Resolve encoder

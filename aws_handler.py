@@ -167,6 +167,7 @@ def _run_pipeline(job: MulticamJob, local_video_paths: list, local_output_path: 
         cutting_strategy=job.cutting_strategy,
         event_type=job.event_type,
         effect_intensity=job.effect_intensity,
+        transition_style=job.transition_style,
         rekognition_sample_rate=job.rekognition_sample_rate,
         audio_source_override=job.audio_source_override,
         selected_audio_source_path=job.selected_audio_source_path,

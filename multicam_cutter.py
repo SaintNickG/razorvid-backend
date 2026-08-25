@@ -225,6 +225,7 @@ def assign_transition_themes(
     cut_list: List[CutSegment],
     event_profile: str,
     effect_intensity: str = "balanced",
+    transition_style: str = "cut",
 ) -> List[CutSegment]:
     """
     Assign alternating transition themes when angle changes.
@@ -233,8 +234,19 @@ def assign_transition_themes(
     """
     profile = (event_profile or "cheer").lower()
     intensity = (effect_intensity or "balanced").lower()
+    selected_style = (transition_style or "cut").lower()
 
-    if intensity == "subtle":
+    if selected_style == "dissolve":
+        cycle = ["dissolve"]
+    elif selected_style == "flash":
+        cycle = ["flash_punch"]
+    elif selected_style == "slide":
+        cycle = ["matrix_pan"]
+    elif selected_style == "stylized":
+        cycle = ["whip_blur", "flash_punch", "neon_glow", "chroma_pop"]
+    elif selected_style == "cut":
+        cycle = ["hard_cut"]
+    elif intensity == "subtle":
         if profile == "concert":
             cycle = ["hard_cut", "chroma_pop", "neon_glow"]
         elif profile == "sport":
@@ -263,7 +275,7 @@ def assign_transition_themes(
             prev_path = seg.source_video_path
             continue
 
-        if prev_path is None:
+        if prev_path is None or selected_style == "cut":
             seg.transition_theme = "hard_cut"
         elif seg.source_video_path != prev_path:
             seg.transition_theme = cycle[idx % len(cycle)]

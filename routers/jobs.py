@@ -68,6 +68,7 @@ class RenderRequest(BaseModel):
     cutting_strategy:        str   = Field(default="local", pattern="^(local|rekognition|interval)$")
     event_type:              str   = Field(default="cheer", pattern="^(cheer|sport|concert|dance)$")
     effect_intensity:        str   = Field(default="balanced", pattern="^(subtle|balanced|cinematic)$")
+    transition_style:        str   = Field(default="cut", pattern="^(cut|dissolve|flash|slide|stylized)$")
     rekognition_sample_rate: int   = Field(default=15, ge=1, le=60)
     audio_source_file:       Optional[str] = None
     project_id:              Optional[str] = None
@@ -241,6 +242,7 @@ async def submit_render(req: RenderRequest, _claims: dict = Depends(require_auth
         cutting_strategy         = CuttingStrategy(req.cutting_strategy),
         event_type               = EventType(req.event_type),
         effect_intensity         = EffectIntensity(req.effect_intensity),
+        transition_style         = req.transition_style,
         rekognition_sample_rate  = req.rekognition_sample_rate,
         audio_source_override    = req.audio_source_file,
         project_id               = req.project_id,
