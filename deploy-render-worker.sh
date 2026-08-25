@@ -11,6 +11,8 @@ SQS_QUEUE="${SQS_QUEUE:-multicam-jobs}"
 DLQ_NAME="${DLQ_NAME:-${SQS_QUEUE}-dlq}"
 INPUT_BUCKET="${INPUT_BUCKET:-razorvid-input-prod-us-east-1--${AWS_ACCOUNT_ID}-us-east-1-an}"
 OUTPUT_BUCKET="${OUTPUT_BUCKET:-multicam-output}"
+INPUT_RETENTION_DAYS="${INPUT_RETENTION_DAYS:-30}"
+OUTPUT_RETENTION_DAYS="${OUTPUT_RETENTION_DAYS:-14}"
 DYNAMODB_TABLE="${DYNAMODB_TABLE:-multicam-jobs}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD)-worker-$(date +%Y%m%d%H%M%S)}"
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
@@ -27,6 +29,15 @@ aws s3api head-bucket --bucket "$OUTPUT_BUCKET" 2>/dev/null \
   || aws s3api create-bucket --bucket "$OUTPUT_BUCKET" --region "$AWS_REGION"
 aws s3api put-public-access-block --bucket "$OUTPUT_BUCKET" \
   --public-access-block-configuration 'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
+INPUT_LIFECYCLE=$(mktemp)
+OUTPUT_LIFECYCLE=$(mktemp)
+jq -n --argjson days "$INPUT_RETENTION_DAYS" '{Rules:[{ID:"ExpireInputMedia",Status:"Enabled",Filter:{Prefix:"uploads/"},Expiration:{Days:$days}}]}' > "$INPUT_LIFECYCLE"
+jq -n --argjson days "$OUTPUT_RETENTION_DAYS" '{Rules:[{ID:"ExpireRenderedMedia",Status:"Enabled",Filter:{Prefix:""},Expiration:{Days:$days}}]}' > "$OUTPUT_LIFECYCLE"
+aws s3api put-bucket-lifecycle-configuration --bucket "$INPUT_BUCKET" \
+  --lifecycle-configuration "file://${INPUT_LIFECYCLE}"
+aws s3api put-bucket-lifecycle-configuration --bucket "$OUTPUT_BUCKET" \
+  --lifecycle-configuration "file://${OUTPUT_LIFECYCLE}"
+rm -f "$INPUT_LIFECYCLE" "$OUTPUT_LIFECYCLE"
 aws sqs set-queue-attributes --queue-url "$QUEUE_URL" --attributes VisibilityTimeout=960
 REDRIVE_POLICY=$(jq -cn --arg arn "$DLQ_ARN" '{deadLetterTargetArn:$arn,maxReceiveCount:"3"}')
 REDRIVE_ATTRIBUTES=$(mktemp)

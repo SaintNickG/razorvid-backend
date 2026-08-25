@@ -55,8 +55,9 @@ DEFAULT_TARGET_WIDTH  = int(os.environ.get("DEFAULT_TARGET_WIDTH", "1920"))
 DEFAULT_TARGET_HEIGHT = int(os.environ.get("DEFAULT_TARGET_HEIGHT", "1080"))
 DEFAULT_TARGET_FPS    = int(os.environ.get("DEFAULT_TARGET_FPS", "30"))
 
-# Max upload size: 2GB per file
-MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
+# Max upload size: 1GB per file during beta. The API streams each upload through
+# the ECS task before S3 storage, so this leaves capacity for concurrent requests.
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(1 * 1024 * 1024 * 1024)))
 
 # ---------------------------------------------------------------------------
 # AI cutting tiers
@@ -67,7 +68,7 @@ FREE_TIER_STRATEGY  = os.environ.get("FREE_TIER_STRATEGY",  "local")
 PAID_TIER_STRATEGY  = os.environ.get("PAID_TIER_STRATEGY",  "rekognition")
 
 # Supported event types
-EVENT_TYPES = ["cheer", "sport", "concert"]
+EVENT_TYPES = ["cheer", "sport", "concert", "dance"]
 
 # Default Rekognition sample rate — analyze every Nth frame
 # Lower N = higher quality, higher cost. Configurable per job.

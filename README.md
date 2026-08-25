@@ -150,6 +150,12 @@ configures its S3/DynamoDB/SQS permissions, ensures the queue mapping is enabled
 and configures a dead-letter queue plus CloudWatch alarms for worker errors,
 stalled queue messages, and exhausted retries.
 
+For the beta defaults, input uploads expire after 30 days and rendered media
+expires after 14 days. Uploads are limited to 1 GB per file. The render worker
+has a 15-minute timeout, 4 GB memory, and 10 GB temporary storage. Override
+media retention during deployment with
+`INPUT_RETENTION_DAYS` and `OUTPUT_RETENTION_DAYS`.
+
 
 ### With Docker (recommended)
 
@@ -236,7 +242,7 @@ ALLOWED_ORIGINS=https://your-frontend-domain.com
 | `DEFAULT_TARGET_WIDTH` | Output video width (px) | `1920` |
 | `DEFAULT_TARGET_HEIGHT` | Output video height (px) | `1080` |
 | `DEFAULT_TARGET_FPS` | Output frame rate | `30` |
-| `MAX_UPLOAD_BYTES` | Max upload size per file | `2147483648` (2GB) |
+| `MAX_UPLOAD_BYTES` | Max upload size per file | `1073741824` (1GB) |
 | `ALLOWED_ORIGINS` | CORS allowed origins (comma-separated) | `http://localhost:3000` |
 | `COGNITO_ISSUER` | Cognito token issuer URL for JWT validation | — |
 | `COGNITO_CLIENT_ID` | Cognito app client id (audience/client_id claim check) | — |
