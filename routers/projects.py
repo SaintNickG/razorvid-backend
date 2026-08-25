@@ -27,12 +27,13 @@ import boto3
 import qrcode
 from qrcode.image.svg import SvgImage
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import Response
 from pydantic import BaseModel
 
 from multicam_pipeline.auth import principal_id_from_claims, require_auth, resolve_actor_id
-from multicam_pipeline.config import AWS_REGION, IS_AWS
+from multicam_pipeline.config import AWS_REGION, EVENT_TYPES, IS_AWS
+from multicam_pipeline.routers.upload import _save_local, _save_s3, _validate_extension
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -40,7 +41,7 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 # Persistent project store.
 #
 # The previous in-memory dict disappeared on every restart. This keeps a
-# JSON-backed copy on disk so App Runner redeploys and local restarts preserve
+# JSON-backed copy on disk so ECS redeploys and local restarts preserve
 # projects until the backing file is explicitly removed.
 # ---------------------------------------------------------------------------
 
@@ -143,6 +144,12 @@ _invite_index: Dict[str, str]
 _projects, _invite_index = _load_store()
 
 
+def _refresh_store() -> None:
+    """Reload shared project state so every ECS task sees current DynamoDB data."""
+    global _projects, _invite_index
+    _projects, _invite_index = _load_store()
+
+
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
@@ -163,6 +170,7 @@ class AddUploadRequest(BaseModel):
     user_id:   Optional[str] = None
     user_name: Optional[str] = None
     files:     List[str]
+    terms_accepted: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +302,9 @@ def register_project_job(project_id: str, job_id: str) -> None:
 @router.post("", status_code=201)
 async def create_project(req: CreateProjectRequest, request: Request, _claims: dict = Depends(require_auth)):
     """Create a new project and return its invite code."""
+    _refresh_store()
+    if req.event_type not in EVENT_TYPES:
+        raise HTTPException(status_code=422, detail=f"Unsupported event type. Choose one of: {', '.join(EVENT_TYPES)}")
     owner_id = resolve_actor_id(_claims, req.owner_id)
     project_id  = str(uuid.uuid4())
     invite_code = _short_code()
@@ -322,14 +333,78 @@ async def create_project(req: CreateProjectRequest, request: Request, _claims: d
 
 @router.get("")
 async def list_projects(request: Request, _claims: dict = Depends(require_auth)):
+    _refresh_store()
     actor_id = principal_id_from_claims(_claims)
     if actor_id:
         return [_project_response(p, request) for p in _projects.values() if actor_id in (p.get("members") or [])]
     return [_project_response(p, request) for p in _projects.values()]
 
 
+def _guest_project_response(project: dict) -> dict:
+    return {
+        "project_id": project["project_id"],
+        "name": project["name"],
+        "event_type": project["event_type"],
+        "member_count": len(project.get("members") or []),
+        "angle_count": sum(len(upload.get("files") or []) for upload in project.get("uploads") or []),
+    }
+
+
+def _project_for_invite(invite_code: str) -> dict:
+    project_id = _invite_index.get(invite_code.strip().upper())
+    if not project_id:
+        raise HTTPException(status_code=404, detail="Invalid invite code.")
+    project = _projects.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    return project
+
+
+@router.get("/share/{invite_code}")
+async def get_guest_project(invite_code: str):
+    """Return limited project details for a public guest upload link."""
+    _refresh_store()
+    return _guest_project_response(_project_for_invite(invite_code))
+
+
+@router.post("/share/{invite_code}/uploads")
+async def add_guest_upload(
+    invite_code: str,
+    file: UploadFile = File(...),
+    guest_name: Optional[str] = Form(None),
+    terms_accepted: bool = Form(False),
+):
+    """Accept one guest angle using the invite code as the upload capability."""
+    _refresh_store()
+    if not terms_accepted:
+        raise HTTPException(status_code=400, detail="Terms acceptance is required before uploading.")
+    _validate_extension(file.filename or "")
+
+    project = _project_for_invite(invite_code)
+    guest_id = f"guest:{uuid.uuid4()}"
+    upload_id = str(uuid.uuid4())
+    if IS_AWS:
+        file_ref = await _save_s3(file, upload_id)
+    else:
+        file_ref = await _save_local(file, upload_id)
+
+    project.setdefault("members", []).append(guest_id)
+    project.setdefault("contributor_names", {})[guest_id] = guest_name or "Guest"
+    project.setdefault("uploads", []).append({
+        "upload_id": upload_id,
+        "user_id": guest_id,
+        "user_name": guest_name or "Guest",
+        "files": [file_ref],
+        "added_at": _now(),
+    })
+    project["updated_at"] = _now()
+    _persist_store()
+    return _guest_project_response(project)
+
+
 @router.get("/invite/{invite_code}")
 async def resolve_invite(invite_code: str, request: Request, _claims: dict = Depends(require_auth)):
+    _refresh_store()
     project_id = _invite_index.get(invite_code.upper())
     if not project_id:
         raise HTTPException(status_code=404, detail="Invalid invite code.")
@@ -343,6 +418,7 @@ async def resolve_invite(invite_code: str, request: Request, _claims: dict = Dep
 
 @router.get("/{project_id}")
 async def get_project(project_id: str, request: Request, _claims: dict = Depends(require_auth)):
+    _refresh_store()
     project = _projects.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
@@ -352,8 +428,31 @@ async def get_project(project_id: str, request: Request, _claims: dict = Depends
     return _project_response(project, request)
 
 
+@router.delete("/{project_id}", status_code=204)
+async def delete_project(project_id: str, _claims: dict = Depends(require_auth)):
+    """Delete a project and all of its project metadata."""
+    _refresh_store()
+    project = _projects.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    actor_id = resolve_actor_id(_claims, project.get("owner_id"))
+    _ensure_owner(project, actor_id)
+    _projects.pop(project_id, None)
+    invite_code = str(project.get("invite_code", "")).upper()
+    _invite_index.pop(invite_code, None)
+
+    if _use_dynamodb():
+        table = _ddb_table()
+        table.delete_item(Key={"pk": f"PROJECT#{project_id}", "sk": "PROFILE"})
+        if invite_code:
+            table.delete_item(Key={"pk": f"INVITE#{invite_code}", "sk": "MAP"})
+
+    _persist_store()
+
+
 @router.get("/{project_id}/invite")
 async def get_project_invite(project_id: str, request: Request, owner_id: Optional[str] = None, _claims: dict = Depends(require_auth)):
+    _refresh_store()
     project = _projects.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
@@ -372,6 +471,7 @@ async def get_project_invite(project_id: str, request: Request, owner_id: Option
 
 @router.get("/{project_id}/invite-qr")
 async def get_project_invite_qr(project_id: str, request: Request, owner_id: Optional[str] = None, _claims: dict = Depends(require_auth)):
+    _refresh_store()
     project = _projects.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
@@ -389,6 +489,7 @@ async def get_project_invite_qr(project_id: str, request: Request, owner_id: Opt
 @router.post("/join")
 async def join_project(req: JoinProjectRequest, request: Request, _claims: dict = Depends(require_auth)):
     """Join a project using its 6-char invite code."""
+    _refresh_store()
     actor_id = resolve_actor_id(_claims, req.user_id)
     project_id = _invite_index.get(req.invite_code.upper())
     if not project_id:
@@ -409,6 +510,9 @@ async def join_project(req: JoinProjectRequest, request: Request, _claims: dict 
 @router.post("/{project_id}/uploads", status_code=201)
 async def add_upload(project_id: str, req: AddUploadRequest, request: Request, _claims: dict = Depends(require_auth)):
     """Register a user's uploaded files against a project."""
+    _refresh_store()
+    if not req.terms_accepted:
+        raise HTTPException(status_code=400, detail="Terms acceptance is required before uploading.")
     actor_id = resolve_actor_id(_claims, req.user_id)
     project = _projects.get(project_id)
     if not project:

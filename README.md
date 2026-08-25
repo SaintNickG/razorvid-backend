@@ -106,7 +106,7 @@ Before the first production deploy, complete these items:
    - S3 output bucket for rendered videos
    - DynamoDB table for job status
    - SQS queue for job dispatch
-2. Set the runtime environment variables for the App Runner service:
+2. Set the runtime environment variables in the ECS task definition:
    - `ENV=aws`
    - `AWS_REGION`
    - `S3_INPUT_BUCKET`
@@ -131,9 +131,22 @@ Before the first production deploy, complete these items:
   - Optional: `ADMIN_GROUPS` (comma-separated claim groups, default `admin`)
 3. Configure the frontend production env file with the deployed API URL:
    - `NEXT_PUBLIC_API_URL=https://api.your-domain.com`
-4. Point your domain to the App Runner service URL.
+4. Point `api.your-domain.com` to the ALB DNS name created for the ECS service.
 5. If you want auth enabled later, set `AUTH_REQUIRED=true` and provide Cognito values.
 6. Test the upload → render → dashboard flow end to end.
+
+### Render Worker
+
+AWS renders are consumed by the `RazorVidRenderWorker` Lambda from the
+`multicam-jobs` SQS queue. Deploy it after the API and whenever pipeline code
+changes:
+
+```bash
+AWS_PROFILE=razorvid ./deploy-render-worker.sh
+```
+
+The script builds `Dockerfile.worker`, creates or updates the Lambda worker,
+configures its S3/DynamoDB/SQS permissions, and ensures the queue mapping is enabled.
 
 
 ### With Docker (recommended)
@@ -232,7 +245,7 @@ ALLOWED_ORIGINS=https://your-frontend-domain.com
 | `STRIPE_PRICE_IDS_JSON` | JSON map of plan name to Stripe price id | `{}` |
 | `STRIPE_DEFAULT_SUCCESS_URL` | Checkout success redirect | `https://razorvid.com/billing/success` |
 | `STRIPE_DEFAULT_CANCEL_URL` | Checkout cancel redirect | `https://razorvid.com/billing/cancel` |
-| `BILLING_STORE_PATH` | Local/App Runner JSON persistence path for billing state | `/tmp/multicam/billing.json` |
+| `BILLING_STORE_PATH` | Local JSON persistence path for billing state | `/tmp/multicam/billing.json` |
 | `BILLING_DYNAMODB_TABLE` | DynamoDB table for durable billing ledger (AWS mode) | empty (JSON fallback) |
 | `ADMIN_USER_IDS` | Comma-separated principal IDs treated as admins | empty |
 | `ADMIN_GROUPS` | Comma-separated claim groups treated as admins | `admin` |

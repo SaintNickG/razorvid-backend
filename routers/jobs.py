@@ -15,6 +15,7 @@ Endpoints:
 import json
 import boto3
 import os
+from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -54,7 +55,7 @@ class RenderRequest(BaseModel):
         target_height:           Output height in pixels.
         target_fps:              Output frame rate.
         cutting_strategy:        local | rekognition | interval.
-        event_type:              cheer | sport | concert.
+        event_type:              cheer | sport | concert | dance.
         effect_intensity:        subtle | balanced | cinematic.
         rekognition_sample_rate: Analyze every Nth frame (paid tier).
     """
@@ -65,7 +66,7 @@ class RenderRequest(BaseModel):
     target_height:           int   = Field(default=DEFAULT_TARGET_HEIGHT, gt=0)
     target_fps:              int   = Field(default=DEFAULT_TARGET_FPS, gt=0)
     cutting_strategy:        str   = Field(default="local", pattern="^(local|rekognition|interval)$")
-    event_type:              str   = Field(default="cheer", pattern="^(cheer|sport|concert)$")
+    event_type:              str   = Field(default="cheer", pattern="^(cheer|sport|concert|dance)$")
     effect_intensity:        str   = Field(default="balanced", pattern="^(subtle|balanced|cinematic)$")
     rekognition_sample_rate: int   = Field(default=15, ge=1, le=60)
     audio_source_file:       Optional[str] = None
@@ -126,12 +127,13 @@ def _submit_aws(job: MulticamJob) -> str:
     # Persist the pending record before enqueue so status polling works instantly.
     dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
     table = dynamodb.Table(DYNAMODB_TABLE)
-    table.put_item(Item=job.to_dict())
+    payload = job.to_dict()
+    table.put_item(Item=json.loads(json.dumps(payload), parse_float=Decimal))
 
     sqs = boto3.client("sqs", region_name=AWS_REGION)
     message = {
         "QueueUrl": SQS_QUEUE_URL,
-        "MessageBody": json.dumps(job.to_dict()),
+        "MessageBody": json.dumps(payload),
     }
 
     # FIFO queues require grouping/deduplication, standard queues reject these fields.

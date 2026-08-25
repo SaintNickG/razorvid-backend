@@ -30,6 +30,7 @@ import json
 import os
 import tempfile
 import traceback
+from decimal import Decimal
 from typing import Any
 from urllib.parse import urlparse
 
@@ -67,7 +68,8 @@ def _upsert_job_status(job: MulticamJob) -> None:
     Args:
         job: The MulticamJob whose current state should be persisted.
     """
-    _ddb_table.put_item(Item=job.to_dict())
+    payload = job.to_dict()
+    _ddb_table.put_item(Item=json.loads(json.dumps(payload), parse_float=Decimal))
     print(f"[aws_handler] DynamoDB updated: job={job.job_id} status={job.status}")
 
 
