@@ -35,14 +35,21 @@ async def get_render_contributor_breakdown(
 
     summary = get_render_contributions(project_id, render_id)
     if not summary:
-        raise HTTPException(
-            status_code=404,
-            detail="No contribution data found for this render. Ensure the render completed for this project.",
-        )
+        return {
+            "projectId": project_id,
+            "renderId": render_id,
+            "totalDuration": 0.0,
+            "contributions": [],
+        }
 
     total_duration = float(summary.get("total_duration", 0.0))
     if total_duration <= 0.0:
-        raise HTTPException(status_code=404, detail="No contribution data found for this render.")
+        return {
+            "projectId": project_id,
+            "renderId": render_id,
+            "totalDuration": 0.0,
+            "contributions": [],
+        }
 
     duration_by_user = summary.get("duration_by_user", {}) or {}
     contributor_names = summary.get("contributor_names", {}) or {}

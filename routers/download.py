@@ -48,6 +48,63 @@ def _parse_s3_uri(s3_uri: str) -> tuple[str, str]:
     return parsed.netloc, parsed.path.lstrip("/")
 
 
+def _authorize_download(job_id: str, claims: dict) -> tuple[str, str]:
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    bucket = S3_OUTPUT_BUCKET
+    key = _get_s3_output_key(job_id)
+
+    try:
+        dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
+        item = dynamodb.Table(os.environ.get("DYNAMODB_TABLE", "multicam-jobs")).get_item(
+            Key={"job_id": job_id}
+        ).get("Item")
+        if item and item.get("output_path"):
+            bucket, key = _parse_s3_uri(item["output_path"])
+
+        actor_id = principal_id_from_claims(claims)
+        project_id = item.get("project_id") if item else None
+        if actor_id and project_id:
+            project = get_project_record(project_id)
+            if not project or actor_id not in (project.get("members") or []):
+                raise HTTPException(status_code=403, detail="You are not allowed to download this render.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+    except s3.exceptions.ClientError as error:
+        if error.response["Error"]["Code"] in ("404", "NoSuchKey"):
+            raise HTTPException(status_code=404, detail=f"Output not found for job '{job_id}'. Job may still be processing.")
+        raise HTTPException(status_code=500, detail=f"S3 error: {error}")
+
+    return bucket, key
+
+
+def _presigned_download_url(bucket: str, key: str, job_id: str) -> str:
+    return boto3.client("s3", region_name=AWS_REGION).generate_presigned_url(
+        "get_object",
+        Params={
+            "Bucket": bucket,
+            "Key": key,
+            "ResponseContentDisposition": f'attachment; filename="multicam_{job_id}.mp4"',
+            "ResponseContentType": "video/mp4",
+        },
+        ExpiresIn=PRESIGNED_URL_EXPIRY_SECONDS,
+    )
+
+
+@router.get("/{job_id}/url")
+async def get_download_url(job_id: str, _claims: dict = Depends(require_auth)):
+    """Return an authenticated, temporary S3 URL for browser video playback or download."""
+    if IS_LOCAL:
+        raise HTTPException(status_code=501, detail="Temporary download URLs are available in AWS mode only.")
+
+    bucket, key = _authorize_download(job_id, _claims)
+    return {"url": _presigned_download_url(bucket, key, job_id), "expires_in_seconds": PRESIGNED_URL_EXPIRY_SECONDS}
+
+
 @router.get("/{job_id}")
 async def download_output(job_id: str, _claims: dict = Depends(require_auth)):
     """
@@ -100,57 +157,5 @@ async def download_output(job_id: str, _claims: dict = Depends(require_auth)):
         )
 
     else:
-        # AWS mode — generate a pre-signed URL and redirect
-        s3  = boto3.client("s3", region_name=AWS_REGION)
-        key = _get_s3_output_key(job_id)
-        bucket = S3_OUTPUT_BUCKET
-
-        # Prefer the exact output URI stored on the job record when available.
-        try:
-            dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
-            item = dynamodb.Table(os.environ.get("DYNAMODB_TABLE", "multicam-jobs")).get_item(
-                Key={"job_id": job_id}
-            ).get("Item")
-            if item and item.get("output_path"):
-                bucket, key = _parse_s3_uri(item["output_path"])
-
-            actor_id = principal_id_from_claims(_claims)
-            project_id = item.get("project_id") if item else None
-            if actor_id and project_id:
-                project = get_project_record(project_id)
-                if not project or actor_id not in (project.get("members") or []):
-                    raise HTTPException(status_code=403, detail="You are not allowed to download this render.")
-        except HTTPException:
-            raise
-        except Exception:
-            # Fall back to default bucket/key resolution if lookup fails.
-            pass
-
-        # Check the object exists before generating the URL
-        try:
-            s3.head_object(Bucket=bucket, Key=key)
-        except s3.exceptions.ClientError as e:
-            error_code = e.response["Error"]["Code"]
-            if error_code in ("404", "NoSuchKey"):
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Output not found for job '{job_id}'. Job may still be processing.",
-                )
-            raise HTTPException(status_code=500, detail=f"S3 error: {e}")
-
-        try:
-            presigned_url = s3.generate_presigned_url(
-                "get_object",
-                Params={
-                    "Bucket": bucket,
-                    "Key": key,
-                    "ResponseContentDisposition": f'attachment; filename="multicam_{job_id}.mp4"',
-                    "ResponseContentType": "video/mp4",
-                },
-                ExpiresIn=PRESIGNED_URL_EXPIRY_SECONDS,
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to generate download URL: {e}")
-
-        # 302 redirect — client downloads directly from S3
-        return RedirectResponse(url=presigned_url, status_code=302)
+        bucket, key = _authorize_download(job_id, _claims)
+        return RedirectResponse(url=_presigned_download_url(bucket, key, job_id), status_code=302)

@@ -238,12 +238,14 @@ def record_render_contributions(project_id: str, render_id: str, segments: List[
     contributor_names = project.setdefault("contributor_names", {})
 
     file_to_user: Dict[str, str] = {}
+    filename_to_user: Dict[str, str] = {}
     for entry in uploads:
         user_id = entry.get("user_id")
         if not user_id:
             continue
         for file_ref in entry.get("files", []) or []:
             file_to_user[file_ref] = user_id
+            filename_to_user[os.path.basename(file_ref)] = user_id
 
     duration_by_user: Dict[str, float] = {}
     total_duration = 0.0
@@ -257,7 +259,10 @@ def record_render_contributions(project_id: str, render_id: str, segments: List[
         if seg_duration <= 0.0:
             continue
 
-        user_id = file_to_user.get(source_video_path, "unknown")
+        user_id = file_to_user.get(
+            source_video_path,
+            filename_to_user.get(os.path.basename(source_video_path), "unknown"),
+        )
         duration_by_user[user_id] = duration_by_user.get(user_id, 0.0) + seg_duration
         total_duration += seg_duration
 

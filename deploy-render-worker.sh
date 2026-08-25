@@ -14,6 +14,7 @@ OUTPUT_BUCKET="${OUTPUT_BUCKET:-multicam-output}"
 INPUT_RETENTION_DAYS="${INPUT_RETENTION_DAYS:-30}"
 OUTPUT_RETENTION_DAYS="${OUTPUT_RETENTION_DAYS:-14}"
 DYNAMODB_TABLE="${DYNAMODB_TABLE:-multicam-jobs}"
+PROJECTS_DYNAMODB_TABLE="${PROJECTS_DYNAMODB_TABLE:-multicam-projects}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD)-worker-$(date +%Y%m%d%H%M%S)}"
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
 
@@ -56,11 +57,11 @@ if [[ -z "$ROLE_ARN" || "$ROLE_ARN" == "None" ]]; then
 fi
 
 aws iam attach-role-policy --role-name "$WORKER_ROLE_NAME" --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-jq -n --arg input "$INPUT_BUCKET" --arg output "$OUTPUT_BUCKET" --arg queue "$QUEUE_ARN" --arg region "$AWS_REGION" --arg account "$AWS_ACCOUNT_ID" '
+jq -n --arg input "$INPUT_BUCKET" --arg output "$OUTPUT_BUCKET" --arg queue "$QUEUE_ARN" --arg region "$AWS_REGION" --arg account "$AWS_ACCOUNT_ID" --arg projects "$PROJECTS_DYNAMODB_TABLE" '
   {Version:"2012-10-17",Statement:[
     {Effect:"Allow",Action:["s3:GetObject","s3:ListBucket"],Resource:[("arn:aws:s3:::" + $input), ("arn:aws:s3:::" + $input + "/*")]},
     {Effect:"Allow",Action:["s3:PutObject","s3:GetObject","s3:ListBucket"],Resource:[("arn:aws:s3:::" + $output), ("arn:aws:s3:::" + $output + "/*")]},
-    {Effect:"Allow",Action:["dynamodb:PutItem","dynamodb:GetItem","dynamodb:UpdateItem"],Resource:("arn:aws:dynamodb:" + $region + ":" + $account + ":table/multicam-jobs")},
+    {Effect:"Allow",Action:["dynamodb:PutItem","dynamodb:GetItem","dynamodb:UpdateItem","dynamodb:BatchWriteItem","dynamodb:Scan"],Resource:[("arn:aws:dynamodb:" + $region + ":" + $account + ":table/multicam-jobs"), ("arn:aws:dynamodb:" + $region + ":" + $account + ":table/" + $projects)]},
     {Effect:"Allow",Action:["sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes","sqs:ChangeMessageVisibility"],Resource:$queue}
   ]}' > "$ACCESS_POLICY"
 aws iam put-role-policy --role-name "$WORKER_ROLE_NAME" --policy-name RazorVidRenderWorkerAccess --policy-document "file://${ACCESS_POLICY}"
