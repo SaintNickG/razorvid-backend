@@ -68,7 +68,7 @@ class RenderRequest(BaseModel):
     cutting_strategy:        str   = Field(default="local", pattern="^(local|rekognition|interval)$")
     event_type:              str   = Field(default="cheer", pattern="^(cheer|sport|concert|dance)$")
     effect_intensity:        str   = Field(default="balanced", pattern="^(subtle|balanced|cinematic)$")
-    transition_style:        str   = Field(default="cut", pattern="^(cut|dissolve|flash|slide|stylized)$")
+    transition_style:        str   = Field(default="cut", pattern="^(auto|cut|dissolve|flash|slide|stylized)$")
     rekognition_sample_rate: int   = Field(default=15, ge=1, le=60)
     audio_source_file:       Optional[str] = None
     project_id:              Optional[str] = None
