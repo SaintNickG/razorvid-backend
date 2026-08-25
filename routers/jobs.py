@@ -16,7 +16,7 @@ import json
 import boto3
 import os
 from decimal import Decimal
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -86,6 +86,7 @@ class JobStatusResponse(BaseModel):
     output_path: Optional[str] = None
     project_id:  Optional[str] = None
     audio_master_source: Optional[str] = None
+    sync_diagnostics: Optional[Dict[str, dict]] = None
     error:       Optional[str] = None
     created_at:  str
     updated_at:  str
@@ -262,6 +263,7 @@ async def submit_render(req: RenderRequest, _claims: dict = Depends(require_auth
         output_path = job.output_path,
         project_id  = job.project_id,
         audio_master_source = job.selected_audio_source_path,
+        sync_diagnostics = job.sync_diagnostics,
         error       = None,
         created_at  = job.created_at,
         updated_at  = job.updated_at,
@@ -298,6 +300,7 @@ async def get_status(job_id: str, _claims: dict = Depends(require_auth)):
         output_path = data.get("output_path"),
         project_id  = data.get("project_id"),
         audio_master_source = data.get("selected_audio_source_path"),
+        sync_diagnostics = data.get("sync_diagnostics"),
         error       = data.get("error"),
         created_at  = data["created_at"],
         updated_at  = data["updated_at"],

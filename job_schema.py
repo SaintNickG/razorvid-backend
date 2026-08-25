@@ -24,6 +24,7 @@ class EventType(str, Enum):
     CHEER   = "cheer"
     SPORT   = "sport"
     CONCERT = "concert"
+    DANCE   = "dance"
 
 
 class CuttingStrategy(str, Enum):
@@ -53,7 +54,7 @@ class MulticamJob:
         target_height:            Output resolution height.
         target_fps:               Output frame rate.
         cutting_strategy:         AI cutting mode: local | rekognition | interval.
-        event_type:               Event type: cheer | sport | concert.
+        event_type:               Event type: cheer | sport | concert | dance.
         effect_intensity:         Visual effects intensity: subtle | balanced | cinematic.
         rekognition_sample_rate:  Analyze every Nth frame (paid tier only).
         audio_source_override:    Optional input video path explicitly chosen by user.
@@ -75,6 +76,7 @@ class MulticamJob:
     rekognition_sample_rate:  int             = 15
     audio_source_override:    Optional[str]   = None
     selected_audio_source_path: Optional[str] = None
+    sync_diagnostics:         Optional[dict]  = None
     project_id:               Optional[str]   = None
     job_id:                   str             = field(default_factory=lambda: str(uuid.uuid4()))
     status:                   JobStatus       = JobStatus.PENDING
@@ -102,6 +104,7 @@ class MulticamJob:
             "rekognition_sample_rate": self.rekognition_sample_rate,
             "audio_source_override":   self.audio_source_override,
             "selected_audio_source_path": self.selected_audio_source_path,
+            "sync_diagnostics":         self.sync_diagnostics,
             "project_id":              self.project_id,
             "status":                  self.status.value,
             "error":                   self.error,
@@ -126,6 +129,7 @@ class MulticamJob:
             rekognition_sample_rate  = int(data.get("rekognition_sample_rate", 15)),
             audio_source_override     = data.get("audio_source_override"),
             selected_audio_source_path = data.get("selected_audio_source_path"),
+            sync_diagnostics          = data.get("sync_diagnostics"),
             project_id               = data.get("project_id"),
             status                   = JobStatus(data.get("status", JobStatus.PENDING)),
             error                    = data.get("error"),

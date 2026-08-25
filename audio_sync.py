@@ -57,6 +57,7 @@ class ReferenceAttempt:
     """Alignment attempt summary for one chosen reference track."""
     reference: AudioReferenceChoice
     offsets: Dict[str, float]
+    results: Dict[str, AlignmentResult]
     weak_matches: List[tuple[str, float, float, float, float, int]]
     avg_confidence: float
 
@@ -299,6 +300,32 @@ def _align_full_track_multifeature(sig: np.ndarray, ref: np.ndarray) -> Alignmen
     return _fuse_alignment_results([waveform_res, onset_res, rms_res, perc_res])
 
 
+def _align_with_window_consensus(sig: np.ndarray, ref: np.ndarray) -> AlignmentResult:
+    """Add high-confidence local windows as corroborating evidence for full-track sync."""
+    full_track_result = _align_full_track_multifeature(sig, ref)
+    if full_track_result.confidence >= 0.60 and full_track_result.peak_ratio >= 1.50:
+        return full_track_result
+
+    candidates = [full_track_result]
+    window_samples = 20 * TARGET_SR
+    shared_length = min(len(sig), len(ref))
+
+    if shared_length < window_samples:
+        return candidates[0]
+
+    for fraction in (0.0, 0.4, 0.8):
+        start = int((shared_length - window_samples) * fraction)
+        window_result = _align_full_track_multifeature(
+            sig[start:start + window_samples],
+            ref[start:start + window_samples],
+        )
+        if window_result.confidence >= 0.35 and window_result.peak_ratio >= 1.2:
+            candidates.append(window_result)
+
+    consensus = _fuse_alignment_results(candidates)
+    return consensus if consensus.confidence > full_track_result.confidence else full_track_result
+
+
 def _resolve_match_thresholds(
     event_type: Optional[str],
     cutting_strategy: Optional[str],
@@ -425,6 +452,9 @@ def _compute_offsets_for_reference(
     """Compute offsets and reliability outcomes using one fixed reference track."""
     reference_audio = audio_tracks[reference.index]
     offsets: Dict[str, float] = {reference.path: 0.0}
+    results: Dict[str, AlignmentResult] = {
+        reference.path: AlignmentResult(0.0, 1.0, 0.0, 0.0, 1.0, 1),
+    }
     weak_matches: List[tuple[str, float, float, float, float, int]] = []
     confidences: List[float] = []
 
@@ -433,8 +463,9 @@ def _compute_offsets_for_reference(
             continue
 
         print(f"[audio_sync] Aligning '{path}' against master reference...")
-        result = _align_full_track_multifeature(audio, reference_audio)
+        result = _align_with_window_consensus(audio, reference_audio)
         offsets[path] = round(result.delay_seconds, 6)
+        results[path] = result
         confidences.append(result.confidence)
         print(
             f"[audio_sync]   → offset: {result.delay_seconds:+.4f}s "
@@ -472,6 +503,7 @@ def _compute_offsets_for_reference(
     return ReferenceAttempt(
         reference=reference,
         offsets=offsets,
+        results=results,
         weak_matches=weak_matches,
         avg_confidence=avg_conf,
     )
@@ -482,7 +514,8 @@ def align_videos_with_reference(
     preferred_reference_path: Optional[str] = None,
     event_type: Optional[str] = None,
     cutting_strategy: Optional[str] = None,
-) -> Tuple[Dict[str, float], str]:
+    include_diagnostics: bool = False,
+) -> Tuple[Dict[str, float], str] | Tuple[Dict[str, float], str, Dict[str, dict]]:
     """
     Compute audio alignment offsets and return the selected master reference path.
 
@@ -585,6 +618,20 @@ def align_videos_with_reference(
             "Tip: choose a different Master Audio Source override, or re-upload clips with clearer shared audio."
         )
         raise ValueError("\n".join(mismatch_lines))
+
+    if include_diagnostics:
+        diagnostics = {
+            path: {
+                "offset_seconds": round(result.delay_seconds, 6),
+                "confidence": round(result.confidence, 3),
+                "peak_ratio": round(result.peak_ratio, 3),
+                "agreement_std_seconds": round(result.agreement_std_seconds, 4),
+                "agreement_support": round(result.agreement_support, 3),
+                "modality_support": result.modality_support,
+            }
+            for path, result in best_attempt.results.items()
+        }
+        return offsets, reference.path, diagnostics
 
     return offsets, reference.path
 

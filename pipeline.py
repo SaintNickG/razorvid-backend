@@ -72,12 +72,14 @@ def run_multicam_job(job: MulticamJob) -> str:
     durations = _resolve_durations(metadata)
 
     # 2) Audio-based alignment to compute per-angle master timeline offsets.
-    offsets, reference_audio_path = align_videos_with_reference(
+    offsets, reference_audio_path, sync_diagnostics = align_videos_with_reference(
         job.video_paths,
         preferred_reference_path=job.audio_source_override,
         event_type=job.event_type.value,
         cutting_strategy=job.cutting_strategy.value,
+        include_diagnostics=True,
     )
+    job.sync_diagnostics = sync_diagnostics
 
     # 3) Build the multicam cut timeline based on job strategy.
     segments = _build_segments(

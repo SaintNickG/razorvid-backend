@@ -170,6 +170,7 @@ def _run_pipeline(job: MulticamJob, local_video_paths: list, local_output_path: 
         rekognition_sample_rate=job.rekognition_sample_rate,
         audio_source_override=job.audio_source_override,
         selected_audio_source_path=job.selected_audio_source_path,
+        sync_diagnostics=job.sync_diagnostics,
         project_id=job.project_id,
         status=job.status,
         error=job.error,
@@ -177,7 +178,7 @@ def _run_pipeline(job: MulticamJob, local_video_paths: list, local_output_path: 
         updated_at=job.updated_at,
     )
     output_path = run_multicam_job(local_job)
-    return output_path, (local_job.selected_audio_source_path or "")
+    return output_path, (local_job.selected_audio_source_path or ""), local_job.sync_diagnostics
 
 
 def _map_local_source_to_original_uri(
@@ -258,11 +259,12 @@ def lambda_handler(event: dict, context: Any) -> dict:
                 local_output_path = os.path.join(tmp_dir, "output.mp4")
 
                 # Step 3: Run the full pipeline against local files
-                local_output_result, selected_audio_source_path = _run_pipeline(
+                local_output_result, selected_audio_source_path, sync_diagnostics = _run_pipeline(
                     job,
                     local_video_paths,
                     local_output_path,
                 )
+                job.sync_diagnostics = sync_diagnostics
                 job.selected_audio_source_path = _map_local_source_to_original_uri(
                     selected_audio_source_path,
                     local_video_paths,
