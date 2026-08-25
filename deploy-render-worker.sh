@@ -8,6 +8,7 @@ ECR_REPO="${ECR_REPO:-razorvid-render-worker}"
 FUNCTION_NAME="${FUNCTION_NAME:-RazorVidRenderWorker}"
 WORKER_ROLE_NAME="${WORKER_ROLE_NAME:-RazorVidRenderWorkerRole}"
 SQS_QUEUE="${SQS_QUEUE:-multicam-jobs}"
+DLQ_NAME="${DLQ_NAME:-${SQS_QUEUE}-dlq}"
 INPUT_BUCKET="${INPUT_BUCKET:-razorvid-input-prod-us-east-1--${AWS_ACCOUNT_ID}-us-east-1-an}"
 OUTPUT_BUCKET="${OUTPUT_BUCKET:-multicam-output}"
 DYNAMODB_TABLE="${DYNAMODB_TABLE:-multicam-jobs}"
@@ -16,16 +17,26 @@ ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
 
 QUEUE_URL=$(aws sqs get-queue-url --queue-name "$SQS_QUEUE" --region "$AWS_REGION" --query QueueUrl --output text)
 QUEUE_ARN=$(aws sqs get-queue-attributes --queue-url "$QUEUE_URL" --attribute-names QueueArn --query 'Attributes.QueueArn' --output text)
+DLQ_URL=$(aws sqs get-queue-url --queue-name "$DLQ_NAME" --region "$AWS_REGION" --query QueueUrl --output text 2>/dev/null || true)
+if [[ -z "$DLQ_URL" || "$DLQ_URL" == "None" ]]; then
+  DLQ_URL=$(aws sqs create-queue --queue-name "$DLQ_NAME" --region "$AWS_REGION" --query QueueUrl --output text)
+fi
+DLQ_ARN=$(aws sqs get-queue-attributes --queue-url "$DLQ_URL" --attribute-names QueueArn --query 'Attributes.QueueArn' --output text)
 
 aws s3api head-bucket --bucket "$OUTPUT_BUCKET" 2>/dev/null \
   || aws s3api create-bucket --bucket "$OUTPUT_BUCKET" --region "$AWS_REGION"
 aws s3api put-public-access-block --bucket "$OUTPUT_BUCKET" \
   --public-access-block-configuration 'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
 aws sqs set-queue-attributes --queue-url "$QUEUE_URL" --attributes VisibilityTimeout=960
+REDRIVE_POLICY=$(jq -cn --arg arn "$DLQ_ARN" '{deadLetterTargetArn:$arn,maxReceiveCount:"3"}')
+REDRIVE_ATTRIBUTES=$(mktemp)
+printf '%s' "$REDRIVE_POLICY" | jq '{RedrivePolicy: tojson}' > "$REDRIVE_ATTRIBUTES"
+aws sqs set-queue-attributes --queue-url "$QUEUE_URL" \
+  --attributes "file://${REDRIVE_ATTRIBUTES}"
 
 TRUST_POLICY=$(mktemp)
 ACCESS_POLICY=$(mktemp)
-trap 'rm -f "$TRUST_POLICY" "$ACCESS_POLICY"' EXIT
+trap 'rm -f "$TRUST_POLICY" "$ACCESS_POLICY" "$REDRIVE_ATTRIBUTES"' EXIT
 
 printf '%s' '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}' > "$TRUST_POLICY"
 ROLE_ARN=$(aws iam get-role --role-name "$WORKER_ROLE_NAME" --query 'Role.Arn' --output text 2>/dev/null || true)
@@ -64,5 +75,27 @@ MAPPING_ID=$(aws lambda list-event-source-mappings --event-source-arn "$QUEUE_AR
 if [[ -z "$MAPPING_ID" || "$MAPPING_ID" == "None" ]]; then
   aws lambda create-event-source-mapping --event-source-arn "$QUEUE_ARN" --function-name "$FUNCTION_NAME" --batch-size 1 --enabled --region "$AWS_REGION" >/dev/null
 fi
+
+aws cloudwatch put-metric-alarm \
+  --alarm-name RazorVidRenderWorkerErrors \
+  --alarm-description "Lambda render worker reported an error" \
+  --namespace AWS/Lambda --metric-name Errors --statistic Sum --period 300 --evaluation-periods 1 \
+  --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold \
+  --dimensions "Name=FunctionName,Value=${FUNCTION_NAME}" \
+  --treat-missing-data notBreaching --region "$AWS_REGION"
+aws cloudwatch put-metric-alarm \
+  --alarm-name RazorVidRenderQueueBacklog \
+  --alarm-description "Render jobs have been waiting in SQS for at least 15 minutes" \
+  --namespace AWS/SQS --metric-name ApproximateAgeOfOldestMessage --statistic Maximum --period 300 --evaluation-periods 3 \
+  --threshold 900 --comparison-operator GreaterThanOrEqualToThreshold \
+  --dimensions "Name=QueueName,Value=${SQS_QUEUE}" \
+  --treat-missing-data notBreaching --region "$AWS_REGION"
+aws cloudwatch put-metric-alarm \
+  --alarm-name RazorVidRenderDeadLetterQueue \
+  --alarm-description "A render job exhausted retries and moved to the dead-letter queue" \
+  --namespace AWS/SQS --metric-name ApproximateNumberOfMessagesVisible --statistic Maximum --period 60 --evaluation-periods 1 \
+  --threshold 1 --comparison-operator GreaterThanOrEqualToThreshold \
+  --dimensions "Name=QueueName,Value=${DLQ_NAME}" \
+  --treat-missing-data notBreaching --region "$AWS_REGION"
 
 printf 'Render worker deployed: %s\n' "$FUNCTION_NAME"

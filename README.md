@@ -146,7 +146,9 @@ AWS_PROFILE=razorvid ./deploy-render-worker.sh
 ```
 
 The script builds `Dockerfile.worker`, creates or updates the Lambda worker,
-configures its S3/DynamoDB/SQS permissions, and ensures the queue mapping is enabled.
+configures its S3/DynamoDB/SQS permissions, ensures the queue mapping is enabled,
+and configures a dead-letter queue plus CloudWatch alarms for worker errors,
+stalled queue messages, and exhausted retries.
 
 
 ### With Docker (recommended)
