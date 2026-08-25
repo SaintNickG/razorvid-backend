@@ -464,7 +464,12 @@ def _compute_offsets_for_reference(
 
         print(f"[audio_sync] Aligning '{path}' against master reference...")
         result = _align_with_window_consensus(audio, reference_audio)
-        offsets[path] = round(result.delay_seconds, 6)
+        # GCC-PHAT reports how far the source lags the reference. Segment
+        # trimming uses the inverse timeline offset: a delayed source must be
+        # advanced in its local timeline to align events with the reference.
+        timeline_offset = -result.delay_seconds
+        result.delay_seconds = timeline_offset
+        offsets[path] = round(timeline_offset, 6)
         results[path] = result
         confidences.append(result.confidence)
         print(
