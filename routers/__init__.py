@@ -5,6 +5,7 @@ from .projects import router as projects_router
 from .contributions import router as contributions_router
 from .billing import router as billing_router
 from .admin import router as admin_router
+from .feedback import router as feedback_router
 
 __all__ = [
 	"upload_router",
@@ -14,4 +15,5 @@ __all__ = [
 	"contributions_router",
 	"billing_router",
 	"admin_router",
+	"feedback_router",
 ]

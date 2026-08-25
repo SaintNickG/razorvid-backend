@@ -37,6 +37,7 @@ from multicam_pipeline.routers import (
     contributions_router,
     billing_router,
     admin_router,
+    feedback_router,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -109,10 +110,17 @@ ALLOWED_ORIGINS = os.environ.get(
     "ALLOWED_ORIGINS",
     "http://localhost:3000,http://localhost:5173,https://razorvid.com,https://www.razorvid.com"
 ).split(",")
+LOCAL_ORIGIN_REGEX = (
+    r"^https?://(?:localhost|127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|"
+    r"192\.168\.\d{1,3}\.\d{1,3})(?::\d+)?$"
+    if IS_LOCAL
+    else None
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=LOCAL_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -135,6 +143,7 @@ app.include_router(projects_router)  # POST /projects  GET /projects/{id}  etc.
 app.include_router(contributions_router)  # GET /api/project/{project}/render/{render}/contributions
 app.include_router(billing_router)  # Stripe checkout + webhook + billing status
 app.include_router(admin_router)  # Failed-job observability and retry operations
+app.include_router(feedback_router)  # Beta feedback submissions
 
 # ---------------------------------------------------------------------------
 # Frontend upload form — served at /
