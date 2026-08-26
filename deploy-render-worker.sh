@@ -15,6 +15,7 @@ INPUT_RETENTION_DAYS="${INPUT_RETENTION_DAYS:-30}"
 OUTPUT_RETENTION_DAYS="${OUTPUT_RETENTION_DAYS:-14}"
 DYNAMODB_TABLE="${DYNAMODB_TABLE:-multicam-jobs}"
 PROJECTS_DYNAMODB_TABLE="${PROJECTS_DYNAMODB_TABLE:-multicam-projects}"
+WORKER_MEMORY_MB="${WORKER_MEMORY_MB:-8192}"
 IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD)-worker-$(date +%Y%m%d%H%M%S)}"
 ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
 
@@ -77,9 +78,9 @@ ENVIRONMENT="Variables={ENV=aws,NUMBA_CACHE_DIR=/tmp/numba-cache,DYNAMODB_TABLE=
 if aws lambda get-function --function-name "$FUNCTION_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
   aws lambda update-function-code --function-name "$FUNCTION_NAME" --image-uri "${ECR_URI}:${IMAGE_TAG}" --region "$AWS_REGION" >/dev/null
   aws lambda wait function-updated-v2 --function-name "$FUNCTION_NAME" --region "$AWS_REGION"
-  aws lambda update-function-configuration --function-name "$FUNCTION_NAME" --timeout 900 --memory-size 4096 --ephemeral-storage Size=10240 --environment "$ENVIRONMENT" --region "$AWS_REGION" >/dev/null
+  aws lambda update-function-configuration --function-name "$FUNCTION_NAME" --timeout 900 --memory-size "$WORKER_MEMORY_MB" --ephemeral-storage Size=10240 --environment "$ENVIRONMENT" --region "$AWS_REGION" >/dev/null
 else
-  aws lambda create-function --function-name "$FUNCTION_NAME" --package-type Image --code "ImageUri=${ECR_URI}:${IMAGE_TAG}" --role "$ROLE_ARN" --timeout 900 --memory-size 4096 --ephemeral-storage Size=10240 --environment "$ENVIRONMENT" --region "$AWS_REGION" >/dev/null
+  aws lambda create-function --function-name "$FUNCTION_NAME" --package-type Image --code "ImageUri=${ECR_URI}:${IMAGE_TAG}" --role "$ROLE_ARN" --timeout 900 --memory-size "$WORKER_MEMORY_MB" --ephemeral-storage Size=10240 --environment "$ENVIRONMENT" --region "$AWS_REGION" >/dev/null
 fi
 aws lambda wait function-active-v2 --function-name "$FUNCTION_NAME" --region "$AWS_REGION"
 
