@@ -18,8 +18,9 @@ from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
 
-# Sample rate used for all audio extraction and correlation
-TARGET_SR = 22050
+# Sample rate used for all audio extraction and correlation. 16 kHz preserves
+# speech, beat, and transient alignment while reducing FFT and feature cost.
+TARGET_SR = int(os.environ.get("SYNC_SAMPLE_RATE", "16000"))
 HOP_LENGTH = 512
 
 

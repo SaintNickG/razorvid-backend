@@ -74,6 +74,10 @@ EVENT_TYPES = ["cheer", "sport", "concert", "dance"]
 # Lower N = higher quality, higher cost. Configurable per job.
 DEFAULT_REKOGNITION_SAMPLE_RATE = int(os.environ.get("DEFAULT_REKOGNITION_SAMPLE_RATE", "15"))
 
+# Local OpenCV motion analysis samples sequential frames at this rate, then
+# interpolates scores onto the higher-resolution audio timeline.
+MOTION_ANALYSIS_FPS = float(os.environ.get("MOTION_ANALYSIS_FPS", "2.0"))
+
 # Cost per 1000 Rekognition DetectLabels calls (USD)
 # Used by the frontend slider to show live cost estimates
 REKOGNITION_COST_PER_1000 = float(os.environ.get("REKOGNITION_COST_PER_1000", "1.00"))

@@ -11,10 +11,11 @@ Two modes:
                   activity labels, shot quality) on top of the local signals for
                   broadcast-quality cutting decisions.
 
-Three event profiles:
+Four event profiles:
     cheer   — beat-driven cuts, stunt apex detection, formation change detection
     sport   — motion-driven cuts, action zone tracking, wide/close logic
     concert — beat-driven cuts, performer face tracking, energy scoring
+    dance   — movement-driven cuts, choreography tracking, energy scoring
 
 Entry point:
     build_ai_cut_list(video_paths, offsets, job) -> List[CutSegment]
@@ -42,6 +43,7 @@ from multicam_pipeline.config import (
     MAX_CUT_DURATION,
     REKOGNITION_COST_PER_1000,
     AWS_REGION,
+    MOTION_ANALYSIS_FPS,
 )
 
 # ---------------------------------------------------------------------------
@@ -142,9 +144,9 @@ def _compute_motion_score(
     """
     Compute per-frame motion score using frame differencing via OpenCV.
 
-    Samples one frame per analysis window aligned to the audio time axis.
-    Motion score = mean absolute pixel difference between consecutive frames,
-    normalized to [0, 1].
+    Samples sequential frames at a bounded rate, then interpolates the motion
+    curve onto the audio-analysis time axis. Sequential decode avoids expensive
+    random seeking at every audio frame for multi-minute renders.
 
     Args:
         video_path: Path to the video file.
@@ -154,39 +156,48 @@ def _compute_motion_score(
     Returns:
         motion: Normalized motion score array aligned to `times`.
     """
-    cap    = cv2.VideoCapture(video_path)
-    fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    motion = np.zeros(len(times), dtype=np.float32)
+    if len(times) == 0:
+        return np.zeros(0, dtype=np.float32)
 
+    cap = cv2.VideoCapture(video_path)
+    source_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_step = max(1, int(round(source_fps / MOTION_ANALYSIS_FPS)))
+    print(
+        f"[ai_cutter]   motion sampling: {MOTION_ANALYSIS_FPS:.1f} fps "
+        f"from {source_fps:.1f} fps source"
+    )
+    sampled_times: List[float] = []
+    sampled_motion: List[float] = []
     prev_gray: Optional[np.ndarray] = None
+    frame_index = 0
 
-    for i, t in enumerate(times):
-        # Seek to the frame corresponding to this time point in the source file
-        source_t    = max(0.0, t - offset)
-        frame_index = int(source_t * fps)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-
+    while True:
         ret, frame = cap.read()
         if not ret:
-            continue
+            break
 
-        # Downsample for speed — motion scoring doesn't need full resolution
-        small = cv2.resize(frame, (160, 90))
-        gray  = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+        if frame_index % frame_step == 0:
+            small = cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA)
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            source_time = frame_index / source_fps
+            sampled_times.append(source_time + offset)
+            if prev_gray is None:
+                sampled_motion.append(0.0)
+            else:
+                sampled_motion.append(float(cv2.absdiff(gray, prev_gray).mean()))
+            prev_gray = gray
 
-        if prev_gray is not None:
-            diff          = cv2.absdiff(gray, prev_gray)
-            motion[i]     = float(diff.mean())
-
-        prev_gray = gray
+        frame_index += 1
 
     cap.release()
 
-    # Normalize to [0, 1]
-    max_val = motion.max()
+    if len(sampled_times) < 2:
+        return np.zeros(len(times), dtype=np.float32)
+
+    motion = np.interp(times, sampled_times, sampled_motion, left=0.0, right=0.0).astype(np.float32)
+    max_val = float(motion.max())
     if max_val > 0:
         motion /= max_val
-
     return motion
 
 
@@ -444,6 +455,7 @@ def _rekognition_score_frames(
         EventType.CHEER:   ["Cheerleading", "Gymnastics", "Dance", "Jumping", "Acrobatics", "Crowd"],
         EventType.SPORT:   ["Sport", "Ball", "Running", "Jumping", "Athlete", "Competition"],
         EventType.CONCERT: ["Concert", "Performance", "Music", "Crowd", "Stage", "Microphone"],
+        EventType.DANCE:   ["Dance", "Dancing", "Performance", "Person", "Stage", "Choreography"],
     }
     boost_labels = BOOST_LABELS.get(event_type, [])
 

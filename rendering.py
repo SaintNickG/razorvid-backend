@@ -170,10 +170,11 @@ def _encoder_quality_flags(
     keyint_min = max(12, int(target_fps * gop_multiplier))
 
     if encoder == "libx264":
-        # CRF 23 is a good default; preset 'fast' balances speed vs compression
+        # Lambda has CPU but no hardware encoder. The fast preset materially
+        # shortens beta renders while preserving a high-quality CRF target.
         return [
             "-crf", "22",
-            "-preset", "medium",
+            "-preset", "fast",
             "-g", str(gop),
             "-keyint_min", str(keyint_min),
             "-pix_fmt", "yuv420p",
