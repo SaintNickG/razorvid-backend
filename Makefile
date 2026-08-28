@@ -19,13 +19,13 @@ PYTHON := $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 dev:
 	@echo "Starting API on :8000 and Web on :3000..."
 	@trap 'kill 0' INT; \
-		uvicorn multicam_pipeline.main:app --reload --port 8000 & \
+		$(PYTHON) -m uvicorn --app-dir .. multicam_pipeline.main:app --reload --port 8000 & \
 		cd ../razorvid-web && npm run dev & \
 		wait
 
 ## Start only the FastAPI backend
 api:
-	uvicorn multicam_pipeline.main:app --reload --port 8000
+	$(PYTHON) -m uvicorn --app-dir .. multicam_pipeline.main:app --reload --port 8000
 
 ## Start only the Next.js frontend
 web:

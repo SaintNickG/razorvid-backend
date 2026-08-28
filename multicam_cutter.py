@@ -133,9 +133,10 @@ def build_cut_list(
             else:
                 resolved_durations[path] = detected
 
-    # Step 2: Compute the master timeline bounds
-    # Master timeline starts at 0 and ends when the last video finishes.
-    # Each video's content spans [offset, offset + duration] on the master timeline.
+    # Each video's content spans [offset, offset + duration] on the master
+    # timeline. The active camera set can change as cameras start or finish.
+    content_starts = [offsets[p] for p in video_paths if resolved_durations[p] > 0]
+    content_ends = [offsets[p] + resolved_durations[p] for p in video_paths if resolved_durations[p] > 0]
     master_end = max(
         offsets[p] + resolved_durations[p]
         for p in video_paths
@@ -145,56 +146,52 @@ def build_cut_list(
     print(f"[multicam_cutter] Master timeline duration: {master_end:.2f}s")
     print(f"[multicam_cutter] Cut interval: {cut_interval}s | Angles: {len(video_paths)}")
 
-    # Step 3: Walk the master timeline in cut_interval steps
-    num_windows = math.ceil(master_end / cut_interval)
+    # Step 3: Partition the timeline wherever the active camera set changes.
+    boundaries = {0.0, master_end}
+    for path in video_paths:
+        if resolved_durations[path] <= 0:
+            continue
+        boundaries.add(max(0.0, offsets[path]))
+        boundaries.add(min(master_end, offsets[path] + resolved_durations[path]))
+    timeline_boundaries = sorted(boundary for boundary in boundaries if 0.0 <= boundary <= master_end)
+
     cut_list: List[CutSegment] = []
     angle_index = 0  # cycles through video_paths in round-robin order
+    previous_source: Optional[str] = None
 
-    for window in range(num_windows):
-        window_start = window * cut_interval
-        window_end = min(window_start + cut_interval, master_end)
+    for region_start, region_end in zip(timeline_boundaries, timeline_boundaries[1:]):
+        if region_end - region_start < 0.1:
+            continue
+        available = [
+            (index, path) for index, path in enumerate(video_paths)
+            if offsets[path] <= region_start
+            and offsets[path] + resolved_durations[path] >= region_end
+        ]
+        if not available:
+            continue
 
-        # Step 4: Find the next available angle for this window
-        # Try each angle starting from the current round-robin position.
-        assigned = False
-        for attempt in range(len(video_paths)):
-            candidate_index = (angle_index + attempt) % len(video_paths)
-            candidate_path = video_paths[candidate_index]
-            candidate_offset = offsets[candidate_path]
-            candidate_duration = resolved_durations[candidate_path]
+        window_start = region_start
+        while window_start < region_end - 1e-6:
+            window_end = min(window_start + cut_interval, region_end)
+            if len(available) == 1:
+                chosen_index, chosen_path = available[0]
+            else:
+                ordered = available[angle_index % len(available):] + available[:angle_index % len(available)]
+                alternatives = [item for item in ordered if item[1] != previous_source]
+                chosen_index, chosen_path = (alternatives or ordered)[0]
 
-            # The candidate is available if the window overlaps its content range
-            content_start = candidate_offset
-            content_end = candidate_offset + candidate_duration
-
-            # Check overlap: window must intersect [content_start, content_end]
-            if window_start >= content_end or window_end <= content_start:
-                # This angle has no content in this window — try the next
-                continue
-
-            # Clamp the window to the actual available content range
-            effective_start = max(window_start, content_start)
-            effective_end = min(window_end, content_end)
-
-            if effective_end - effective_start < 0.1:
-                # Segment too short to be useful (< 100ms), skip
-                continue
-
-            cut_list.append(CutSegment(
-                start_time=effective_start,
-                end_time=effective_end,
-                source_video_path=candidate_path,
-                offset=candidate_offset,
-            ))
-
-            # Advance round-robin to the next angle for the following window
-            angle_index = (candidate_index + 1) % len(video_paths)
-            assigned = True
-            break
-
-        if not assigned:
-            print(f"[multicam_cutter] Warning: no available angle for window "
-                  f"{window_start:.2f}s–{window_end:.2f}s, dropping.")
+            if cut_list and cut_list[-1].source_video_path == chosen_path:
+                cut_list[-1].end_time = window_end
+            else:
+                cut_list.append(CutSegment(
+                    start_time=window_start,
+                    end_time=window_end,
+                    source_video_path=chosen_path,
+                    offset=offsets[chosen_path],
+                ))
+            previous_source = chosen_path
+            angle_index = (chosen_index + 1) % len(video_paths)
+            window_start = window_end
 
     print(f"[multicam_cutter] Generated {len(cut_list)} cut segments.")
     return cut_list

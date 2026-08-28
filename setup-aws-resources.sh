@@ -8,7 +8,7 @@ OUTPUT_BUCKET="${OUTPUT_BUCKET:-multicam-output}"
 DDB_TABLE="${DDB_TABLE:-multicam-jobs}"
 PROJECTS_DDB_TABLE="${PROJECTS_DDB_TABLE:-multicam-projects}"
 SQS_QUEUE="${SQS_QUEUE:-multicam-jobs}"
-APP_RUNNER_ROLE_NAME="${APP_RUNNER_ROLE_NAME:-AppRunnerServiceRole}"
+ECS_TASK_ROLE_NAME="${ECS_TASK_ROLE_NAME:-RazorVidEcsTaskRole}"
 
 echo "Using region: $AWS_REGION"
 echo "Account ID: $ACCOUNT_ID"
@@ -53,16 +53,16 @@ aws sqs create-queue \
   --queue-name "$SQS_QUEUE" \
   --region "$AWS_REGION" 2>/dev/null || true
 
-echo "[5/7] Creating IAM role for App Runner"
-ROLE_ARN=$(aws iam get-role --role-name "$APP_RUNNER_ROLE_NAME" --query 'Role.Arn' --output text 2>/dev/null || true)
+echo "[5/7] Creating IAM role for ECS tasks"
+ROLE_ARN=$(aws iam get-role --role-name "$ECS_TASK_ROLE_NAME" --query 'Role.Arn' --output text 2>/dev/null || true)
 if [ -z "$ROLE_ARN" ]; then
   ROLE_ARN=$(aws iam create-role \
-    --role-name "$APP_RUNNER_ROLE_NAME" \
-    --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"tasks.apprunner.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
+    --role-name "$ECS_TASK_ROLE_NAME" \
+    --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
     --query 'Role.Arn' --output text)
 fi
 
-cat > /tmp/apprunner-policy.json <<EOF
+cat > /tmp/ecs-task-role-policy.json <<EOF
 {
   "Version": "2012-10-17",
   "Statement": [
@@ -85,6 +85,7 @@ cat > /tmp/apprunner-policy.json <<EOF
       "Action": [
         "dynamodb:PutItem",
         "dynamodb:GetItem",
+        "dynamodb:BatchWriteItem",
         "dynamodb:Scan",
         "dynamodb:UpdateItem"
       ],
@@ -97,27 +98,33 @@ cat > /tmp/apprunner-policy.json <<EOF
       "Effect": "Allow",
       "Action": [
         "sqs:SendMessage",
-        "sqs:ReceiveMessage",
-        "sqs:DeleteMessage",
         "sqs:GetQueueAttributes"
       ],
       "Resource": "arn:aws:sqs:$AWS_REGION:$ACCOUNT_ID:$SQS_QUEUE"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "rekognition:DetectLabels",
+        "rekognition:DetectFaces"
+      ],
+      "Resource": "*"
     }
   ]
 }
 EOF
 
 aws iam put-role-policy \
-  --role-name "$APP_RUNNER_ROLE_NAME" \
-  --policy-name RazorVidAppRunnerAccess \
-  --policy-document file:///tmp/apprunner-policy.json 2>/dev/null || true
+  --role-name "$ECS_TASK_ROLE_NAME" \
+  --policy-name RazorVidRuntimeAccess \
+  --policy-document file:///tmp/ecs-task-role-policy.json
 
 echo "[6/7] Waiting for projects table to become ACTIVE"
 aws dynamodb wait table-exists --table-name "$PROJECTS_DDB_TABLE" --region "$AWS_REGION"
 
 echo "[7/7] Done"
 echo ""
-echo "Use these values in App Runner runtime environment:"
+echo "Use these values in the ECS task definition environment:"
 echo "ENV=aws"
 echo "AWS_REGION=$AWS_REGION"
 echo "S3_INPUT_BUCKET=$INPUT_BUCKET"

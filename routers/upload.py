@@ -18,7 +18,7 @@ import uuid
 import boto3
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse
 
 from multicam_pipeline.auth import require_auth
@@ -92,6 +92,7 @@ async def _save_s3(file: UploadFile, upload_id: str) -> str:
 @router.post("")
 async def upload_videos(
     files: List[UploadFile] = File(...),
+    terms_accepted: bool = Form(False),
     _claims: dict = Depends(require_auth),
 ):
     """
@@ -113,6 +114,8 @@ async def upload_videos(
     """
     if not files:
         raise HTTPException(status_code=400, detail="No files provided.")
+    if not terms_accepted:
+        raise HTTPException(status_code=400, detail="Terms acceptance is required before uploading.")
 
     upload_id = str(uuid.uuid4())
     saved_refs: List[str] = []

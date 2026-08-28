@@ -733,7 +733,10 @@
     let inviteJoinInFlight = false;
     let inviteJoinDone = false;
 
-    const API = '';  // same origin — change to 'http://localhost:8000' if serving separately
+    const isLocalFrontend = window.location.protocol === 'file:'
+      || (['localhost', '127.0.0.1'].includes(window.location.hostname)
+        && window.location.port !== '8000');
+    const API = isLocalFrontend ? 'http://localhost:8000' : '';
 
     // ---------------------------------------------------------------------------
     // DOM refs

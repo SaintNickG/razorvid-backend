@@ -406,13 +406,13 @@ def build_ffmpeg_command(
     cmd: List[str] = ["ffmpeg", "-y"]
 
     # --- Input section ---
-    # Each segment is a separately trimmed input using -ss (seek) and -to.
+    # Each segment is a separately trimmed input using -ss (seek) and -t.
     # Using input-side -ss is faster than output-side seeking for large files
     # because FFmpeg seeks before decoding.
     for seg in segments:
         cmd += [
             "-ss", f"{seg.source_start:.6f}",   # seek to trim start in source file
-            "-to", f"{seg.source_end:.6f}",      # stop at trim end in source file
+            "-t", f"{seg.duration:.6f}",         # consume exactly this segment duration
             "-i", seg.source_video_path,
         ]
 

@@ -670,7 +670,11 @@ def _pick_best_angle(
         if current_t < content_start or current_t >= content_end:
             continue
 
-        s = score_fn(sig, frame_idx, strategy)
+        # Signal arrays can have different lengths when camera durations or
+        # audio offsets differ. Resolve each score at the shared master time.
+        signal_idx = int(np.searchsorted(sig.times, current_t, side="right") - 1)
+        signal_idx = max(0, min(signal_idx, len(sig.times) - 1))
+        s = score_fn(sig, signal_idx, strategy)
 
         # Small penalty for repeating the same angle — encourages variety
         if sig.path == last_path:
@@ -680,6 +684,12 @@ def _pick_best_angle(
 
     if not scores:
         return None
+
+    # When another valid angle exists, always switch away from the previous
+    # source. This keeps the active set rotating as cameras finish.
+    alternatives = [(s, sig) for s, sig in scores if sig.path != last_path]
+    if alternatives:
+        scores = alternatives
 
     # Force a switch if we've been on the same angle too long
     if time_on_angle >= MAX_CUT_DURATION and last_path is not None:
@@ -843,8 +853,10 @@ def build_ai_cut_list(
     # ---------------------------------------------------------------------------
     # Step 3: Walk the master timeline and make cut decisions
     # ---------------------------------------------------------------------------
-    # Use the reference angle's time axis as the master clock
-    ref_times  = signals[0].times
+    # The first camera's signal axis may end before another camera. Use the
+    # full master timeline so late-ending angles can still be selected.
+    analysis_step = HOP_LENGTH / TARGET_SR
+    ref_times = np.arange(0.0, master_end + analysis_step / 2.0, analysis_step)
     cut_list:  List[CutSegment] = []
     last_path: Optional[str]   = None
     last_cut_t: float          = 0.0
@@ -896,7 +908,7 @@ def build_ai_cut_list(
                 ))
             seg_start  = t
             last_cut_t = t
-            last_path  = current_angle.path
+            last_path  = best.path
 
         current_angle = best
 

@@ -4,7 +4,7 @@ billing_store.py
 Lightweight JSON-backed billing state and entitlement helpers.
 
 This module intentionally mirrors the existing project-store persistence style
-to keep deployment simple in local and App Runner environments.
+to keep deployment simple in local and ECS environments.
 
 Storage strategy:
 - AWS mode with BILLING_DYNAMODB_TABLE configured: DynamoDB-backed durable ledger
