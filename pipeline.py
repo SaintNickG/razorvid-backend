@@ -81,6 +81,11 @@ def run_multicam_job(job: MulticamJob) -> str:
     )
     job.sync_diagnostics = sync_diagnostics
 
+    # Alignment is relative to the reference, so offsets can be negative. Shift
+    # the whole timeline to start at 0 or the cutters drop the earliest footage.
+    earliest_offset = min(offsets.values())
+    offsets = {path: value - earliest_offset for path, value in offsets.items()}
+
     # 3) Build the multicam cut timeline based on job strategy.
     segments = _build_segments(
         video_paths=job.video_paths,

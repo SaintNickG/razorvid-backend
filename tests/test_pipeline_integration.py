@@ -6,7 +6,31 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from multicam_pipeline.multicam_cutter import build_cut_list
+from multicam_pipeline.multicam_cutter import build_cut_list, CutSegment
+
+
+def test_ffmpeg_command_caps_threads_for_long_renders() -> None:
+    from multicam_pipeline.rendering import build_ffmpeg_command
+
+    segments = [
+        CutSegment(float(i) * 2.0, float(i) * 2.0 + 2.0, f"cam{i % 3}.mp4", 0.0)
+        for i in range(60)
+    ]
+    command = build_ffmpeg_command(
+        segments,
+        "output.mp4",
+        "libx264",
+        audio_source_path="cam0.mp4",
+    )
+
+    # Every input must cap its decoder threads, otherwise long renders exhaust
+    # the Lambda thread limit and FFmpeg exits with EAGAIN (245).
+    input_indexes = [index for index, arg in enumerate(command) if arg == "-i"]
+    for index in input_indexes:
+        window = command[max(0, index - 7):index]
+        assert "-threads" in window
+        assert int(window[window.index("-threads") + 1]) <= 2
+    assert "-filter_complex_threads" in command
 
 
 def _missing_prerequisites() -> list[str]:
@@ -231,8 +255,9 @@ def test_align_videos_and_render_end_to_end(tmp_path: Path) -> None:
 
     offsets = align_videos([str(cam1), str(cam2)])
 
-    # cam2 audio starts later than cam1 by roughly 1.2s.
-    assert abs(offsets[str(cam2)] - 1.2) < 0.2
+    # cam2's shared audio sits 1.2s into its own file, so cam2 began recording
+    # 1.2s earlier and starts earlier on the master timeline.
+    assert abs(offsets[str(cam2)] + 1.2) < 0.2
 
     job = MulticamJob(
         video_paths=[str(cam1), str(cam2)],
@@ -249,3 +274,16 @@ def test_align_videos_and_render_end_to_end(tmp_path: Path) -> None:
     assert rendered_path == str(output)
     assert output.exists()
     assert output.stat().st_size > 10000
+
+    # cam2 covers master [0, 8] and cam1 covers [1.2, 9.2], so the rendered
+    # timeline must span both unique ends rather than a single camera.
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(output),
+        ],
+        check=True, capture_output=True, text=True,
+    )
+    assert abs(float(probe.stdout.strip()) - 9.2) < 0.5

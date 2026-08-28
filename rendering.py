@@ -16,11 +16,20 @@ Dependencies:
     pip install ffmpeg-python
 """
 
+import os
 import subprocess
 import platform
 import shutil
 from typing import List, Optional
 from multicam_pipeline.multicam_cutter import CutSegment, assign_transition_themes
+
+
+# One input is opened per cut segment, and every input starts its own decoder
+# threads. Long renders otherwise exhaust the Lambda thread limit, which FFmpeg
+# surfaces as EAGAIN (exit code 245).
+DECODE_THREADS_PER_INPUT = max(1, int(os.environ.get("RENDER_DECODE_THREADS", "1")))
+FILTER_THREADS = max(1, int(os.environ.get("RENDER_FILTER_THREADS", "2")))
+ENCODE_THREADS = max(1, int(os.environ.get("RENDER_ENCODE_THREADS", "4")))
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +420,7 @@ def build_ffmpeg_command(
     # because FFmpeg seeks before decoding.
     for seg in segments:
         cmd += [
+            "-threads", str(DECODE_THREADS_PER_INPUT),
             "-ss", f"{seg.source_start:.6f}",   # seek to trim start in source file
             "-t", f"{seg.duration:.6f}",         # consume exactly this segment duration
             "-i", seg.source_video_path,
@@ -418,7 +428,7 @@ def build_ffmpeg_command(
 
     audio_source_input_index: Optional[int] = None
     if audio_source_path:
-        cmd += ["-i", audio_source_path]
+        cmd += ["-threads", str(DECODE_THREADS_PER_INPUT), "-i", audio_source_path]
         audio_source_input_index = len(segments)
 
     # --- Filtergraph section ---
@@ -433,12 +443,14 @@ def build_ffmpeg_command(
     )
     filter_complex = ";".join(filter_lines)
 
+    cmd += ["-filter_complex_threads", str(FILTER_THREADS)]
     cmd += ["-filter_complex", filter_complex]
 
     # Map the final concatenated video and audio streams to the output
     cmd += ["-map", "[vout]", "-map", "[aout]"]
 
     # --- Video encoding ---
+    cmd += ["-threads", str(ENCODE_THREADS)]
     cmd += ["-c:v", encoder]
     cmd += _encoder_quality_flags(
         encoder=encoder,

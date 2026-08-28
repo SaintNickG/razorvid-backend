@@ -465,11 +465,11 @@ def _compute_offsets_for_reference(
 
         print(f"[audio_sync] Aligning '{path}' against master reference...")
         result = _align_with_window_consensus(audio, reference_audio)
-        # GCC-PHAT delay is reported in the source-vs-reference frame. For the
-        # timeline builder, a delayed source must keep a positive offset value
-        # relative to the master reference so we can trim the source later in its
-        # local timeline without inverting the edit order.
-        timeline_offset = result.delay_seconds
+        # GCC-PHAT reports a positive delay when the shared audio appears later
+        # inside this source's own file. The timeline convention is the inverse:
+        # CutSegment uses local_time = master_time - offset, so a source whose
+        # content sits later in its file starts earlier on the master timeline.
+        timeline_offset = -result.delay_seconds
         result.delay_seconds = timeline_offset
         offsets[path] = round(timeline_offset, 6)
         results[path] = result
