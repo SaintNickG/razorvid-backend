@@ -33,6 +33,38 @@ def test_ffmpeg_command_caps_threads_for_long_renders() -> None:
     assert "-filter_complex_threads" in command
 
 
+def test_ffmpeg_command_opens_each_source_once() -> None:
+    """Input count must equal unique source files, not segment count."""
+    from multicam_pipeline.rendering import build_ffmpeg_command
+
+    # 60 segments across 3 source files — previously opened 60 inputs.
+    segments = [
+        CutSegment(float(i) * 2.0, float(i) * 2.0 + 2.0, f"cam{i % 3}.mp4", 0.0)
+        for i in range(60)
+    ]
+    command = build_ffmpeg_command(
+        segments,
+        "output.mp4",
+        "libx264",
+        audio_source_path="cam0.mp4",
+    )
+
+    # cam0.mp4 is both a source and the audio reference — must not be opened twice.
+    inputs = [command[i + 1] for i, arg in enumerate(command) if arg == "-i"]
+    assert inputs == ["cam0.mp4", "cam1.mp4", "cam2.mp4"], (
+        f"Expected 3 unique inputs, got {len(inputs)}: {inputs}"
+    )
+
+    # trim filters must appear in the filtergraph for each segment.
+    filter_complex = command[command.index("-filter_complex") + 1]
+    # Video trim uses "trim=start=" (not prefixed by 'a').
+    # atrim=start= (audio) is a substring of trim=start=, so count exclusively.
+    video_trims = filter_complex.count("trim=start=") - filter_complex.count("atrim=start=")
+    assert video_trims == 60, f"Expected 60 video trims, got {video_trims}"
+    assert filter_complex.count("atrim=start=") == 60  # audio trims
+    assert filter_complex.count("setpts=PTS-STARTPTS") >= 60
+
+
 def _missing_prerequisites() -> list[str]:
     """Return a list of missing runtime prerequisites for this integration test."""
     missing: list[str] = []

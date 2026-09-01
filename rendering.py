@@ -11,6 +11,10 @@ Design goals:
       and fall back cleanly to libx264 if none are available.
     - Build a single FFmpeg invocation using a filtergraph so all
       trimming, scaling, and concatenation happens in one pass.
+    - Open each unique source file exactly once regardless of how many
+      cut segments reference it. Trim windows are applied inside the
+      filtergraph with trim/setpts so decoder memory scales with the
+      number of distinct source files, not the number of segments.
 
 Dependencies:
     pip install ffmpeg-python
@@ -24,9 +28,9 @@ from typing import List, Optional
 from multicam_pipeline.multicam_cutter import CutSegment, assign_transition_themes
 
 
-# One input is opened per cut segment, and every input starts its own decoder
-# threads. Long renders otherwise exhaust the Lambda thread limit, which FFmpeg
-# surfaces as EAGAIN (exit code 245).
+# Each unique source file is opened once. Decoder threads are capped so that
+# even with many source files the Lambda thread limit is not exhausted (FFmpeg
+# surfaces thread exhaustion as EAGAIN, exit code 245).
 DECODE_THREADS_PER_INPUT = max(1, int(os.environ.get("RENDER_DECODE_THREADS", "1")))
 FILTER_THREADS = max(1, int(os.environ.get("RENDER_FILTER_THREADS", "2")))
 ENCODE_THREADS = max(1, int(os.environ.get("RENDER_ENCODE_THREADS", "4")))
@@ -233,6 +237,7 @@ def _encoder_quality_flags(
 
 def _build_filtergraph(
     segments: List[CutSegment],
+    source_input_indices: List[int],
     target_width: int,
     target_height: int,
     target_fps: int,
@@ -241,26 +246,29 @@ def _build_filtergraph(
     audio_source_duration: Optional[float] = None,
 ) -> tuple[List[str], str]:
     """
-    Build the FFmpeg -filter_complex string and the final output stream labels
-    for a concat-based multicam render.
+    Build the FFmpeg -filter_complex string for a concat-based multicam render.
 
-    Each segment is an independently trimmed input stream. The filtergraph:
-        1. Scales every video segment to a common resolution (target_width x target_height)
-           using pad to avoid distortion on mismatched aspect ratios.
-        2. Sets a consistent frame rate via fps filter.
-        3. Concatenates all video + audio streams in timeline order using the
-           concat filter.
+    Each unique source file is opened once as an FFmpeg input. Segments
+    reference their source by input index and apply trim/setpts inside the
+    filtergraph to extract the correct window. This keeps decoder memory
+    proportional to the number of distinct source files, not the number of
+    cut segments.
 
     Args:
-        segments:       Ordered list of CutSegment objects.
-        target_width:   Output video width in pixels.
-        target_height:  Output video height in pixels.
-        target_fps:     Output frame rate.
+        segments:             Ordered list of CutSegment objects.
+        source_input_indices: Per-segment index into the FFmpeg input list
+                              (parallel to segments; same source → same index).
+        target_width:         Output video width in pixels.
+        target_height:        Output video height in pixels.
+        target_fps:           Output frame rate.
+        audio_source_input_index: Input index of the reference audio file, or
+                              None to pull audio from each segment's own source.
+        audio_source_offset:  Master-timeline offset of the audio reference.
+        audio_source_duration: Duration of the audio reference file in seconds.
 
     Returns:
-        Tuple of:
-            - filter_lines: List of filtergraph fragment strings (joined with ';')
-            - out_labels:   The final [vout][aout] stream label string for -map
+        Tuple of (filter_lines, out_labels) where filter_lines are joined with
+        ';' to form -filter_complex and out_labels is the final stream label.
     """
     filter_lines: List[str] = []
     n = len(segments)
@@ -290,12 +298,15 @@ def _build_filtergraph(
 
     for i in range(n):
         seg = segments[i]
+        src_idx = source_input_indices[i]
         seg_theme = getattr(seg, "transition_theme", "hard_cut")
-        # Each input is referenced as [i:v] and [i:a] in the filtergraph.
-        # Scale to target resolution, pad black bars to preserve aspect ratio,
-        # then enforce a consistent frame rate.
+
+        # Trim the correct window from the shared source input, then reset PTS
+        # to zero so the concat filter sees a clean timeline for each segment.
         filter_lines.append(
-            f"[{i}:v]"
+            f"[{src_idx}:v]"
+            f"trim=start={seg.source_start:.6f}:end={seg.source_end:.6f},"
+            f"setpts=PTS-STARTPTS,"
             f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
             f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,"
             f"{_themed_chain(seg_theme)},"
@@ -304,11 +315,15 @@ def _build_filtergraph(
             f"[v{i}]"
         )
 
-        # Audio can either come from each segment input (legacy behavior) or
-        # from one globally selected reference input for the full render.
+        # Audio: pull from the designated reference input (trimmed to the
+        # master-timeline window for this segment) or fall back to the
+        # segment's own source input when no reference is set.
         if audio_source_input_index is None:
             filter_lines.append(
-                f"[{i}:a]aformat=sample_rates=44100:channel_layouts=stereo[a{i}]"
+                f"[{src_idx}:a]"
+                f"atrim=start={seg.source_start:.6f}:end={seg.source_end:.6f},"
+                f"asetpts=PTS-STARTPTS,"
+                f"aformat=sample_rates=44100:channel_layouts=stereo[a{i}]"
             )
             continue
 
@@ -367,8 +382,6 @@ def _build_filtergraph(
 
     # Build the concat filter input labels: [v0][a0][v1][a1]...[vN][aN]
     concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
-
-    # concat filter: n=segment count, v=1 video stream out, a=1 audio stream out
     filter_lines.append(
         f"{concat_inputs}concat=n={n}:v=1:a=1[vout][aout]"
     )
@@ -395,9 +408,11 @@ def build_ffmpeg_command(
     """
     Construct the full FFmpeg subprocess command list for a multicam render.
 
-    Each CutSegment becomes a separate -ss / -to trimmed input. The filtergraph
-    handles scaling, fps normalization, and concatenation in a single pass.
-    No intermediate files are written.
+    Each unique source file is opened exactly once as an FFmpeg input.
+    Segment trimming is performed inside the filtergraph using trim/setpts
+    filters, so decoder memory scales with the number of distinct source
+    files rather than the number of cut segments. This prevents OOM on
+    long renders with many segments from a small set of source files.
 
     Args:
         segments:      Ordered CutSegment list from build_cut_list().
@@ -415,25 +430,33 @@ def build_ffmpeg_command(
     cmd: List[str] = ["ffmpeg", "-y"]
 
     # --- Input section ---
-    # Each segment is a separately trimmed input using -ss (seek) and -t.
-    # Using input-side -ss is faster than output-side seeking for large files
-    # because FFmpeg seeks before decoding.
+    # Deduplicate source paths while preserving first-seen order so that
+    # filtergraph input indices are stable and predictable.
+    seen: dict[str, int] = {}
+    unique_sources: List[str] = []
     for seg in segments:
-        cmd += [
-            "-threads", str(DECODE_THREADS_PER_INPUT),
-            "-ss", f"{seg.source_start:.6f}",   # seek to trim start in source file
-            "-t", f"{seg.duration:.6f}",         # consume exactly this segment duration
-            "-i", seg.source_video_path,
-        ]
+        if seg.source_video_path not in seen:
+            seen[seg.source_video_path] = len(unique_sources)
+            unique_sources.append(seg.source_video_path)
+    source_input_indices = [seen[seg.source_video_path] for seg in segments]
+
+    for path in unique_sources:
+        cmd += ["-threads", str(DECODE_THREADS_PER_INPUT), "-i", path]
 
     audio_source_input_index: Optional[int] = None
     if audio_source_path:
-        cmd += ["-threads", str(DECODE_THREADS_PER_INPUT), "-i", audio_source_path]
-        audio_source_input_index = len(segments)
+        # If the audio reference is already one of the source inputs, reuse
+        # its index rather than opening the file a second time.
+        if audio_source_path in seen:
+            audio_source_input_index = seen[audio_source_path]
+        else:
+            cmd += ["-threads", str(DECODE_THREADS_PER_INPUT), "-i", audio_source_path]
+            audio_source_input_index = len(unique_sources)
 
     # --- Filtergraph section ---
     filter_lines, out_labels = _build_filtergraph(
         segments,
+        source_input_indices,
         target_width,
         target_height,
         target_fps,
