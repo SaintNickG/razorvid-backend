@@ -9,6 +9,47 @@ import pytest
 from multicam_pipeline.multicam_cutter import build_cut_list, CutSegment
 
 
+def test_ingestion_picks_largest_video_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """extract_metadata must select the highest-resolution video stream, not the first."""
+    from multicam_pipeline.ingestion import extract_metadata
+
+    # Simulate a .mov with a thumbnail track (stream 0, 224x128) before the
+    # real video track (stream 1, 1920x1080) — exactly the iPhone companion file layout.
+    fake_probe = {
+        "streams": [
+            {"codec_type": "video", "width": 224, "height": 128, "r_frame_rate": "15/1"},
+            {"codec_type": "video", "width": 1920, "height": 1080, "r_frame_rate": "30/1"},
+            {"codec_type": "audio", "channels": 2},
+        ],
+        "format": {"duration": "10.0"},
+    }
+    monkeypatch.setattr("multicam_pipeline.ingestion._run_ffprobe", lambda _: fake_probe)
+    monkeypatch.setattr("os.path.isfile", lambda _: True)
+
+    meta = extract_metadata("fake.mov")
+    assert meta.width == 1920
+    assert meta.height == 1080
+    assert meta.fps == 30.0
+
+
+def test_ingestion_rejects_thumbnail_track_only_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """validate_and_ingest must reject a file whose only video stream is a thumbnail track."""
+    from multicam_pipeline.ingestion import validate_and_ingest
+
+    fake_probe = {
+        "streams": [
+            {"codec_type": "audio", "channels": 2},
+            {"codec_type": "video", "width": 224, "height": 128, "r_frame_rate": "15/1"},
+        ],
+        "format": {"duration": "190.0"},
+    }
+    monkeypatch.setattr("multicam_pipeline.ingestion._run_ffprobe", lambda _: fake_probe)
+    monkeypatch.setattr("os.path.isfile", lambda _: True)
+
+    with pytest.raises(ValueError, match="resolution.*too low"):
+        validate_and_ingest(["IMG_7506.mov"])
+
+
 def test_ffmpeg_command_caps_threads_for_long_renders() -> None:
     from multicam_pipeline.rendering import build_ffmpeg_command
 
@@ -112,7 +153,7 @@ def _make_synthetic_video(
         "ffmpeg",
         "-y",
         "-f", "lavfi",
-        "-i", f"{pattern}=size=640x360:rate=30:duration=8",
+        "-i", f"{pattern}=size=640x480:rate=30:duration=8",
         "-i", str(audio_path),
         "-filter:a", audio_filter,
         "-c:v", "libx264",
@@ -296,7 +337,7 @@ def test_align_videos_and_render_end_to_end(tmp_path: Path) -> None:
         output_path=str(output),
         cut_interval=2.0,
         target_width=640,
-        target_height=360,
+        target_height=480,
         target_fps=30,
         cutting_strategy=CuttingStrategy.INTERVAL,
     )

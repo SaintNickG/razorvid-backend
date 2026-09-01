@@ -112,10 +112,16 @@ def extract_metadata(video_path: str) -> VideoMetadata:
 
     duration = float(fmt.get("duration", 0.0))
 
-    # Extract video stream properties
-    video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
-    if video_stream is None:
+    # Extract video stream properties — pick the largest-area stream so that
+    # companion thumbnail tracks (e.g. iPhone 224x128 mebx) are not mistaken
+    # for the primary camera angle.
+    video_streams = [s for s in streams if s.get("codec_type") == "video"]
+    if not video_streams:
         raise RuntimeError(f"No video stream found in '{video_path}'")
+    video_stream = max(
+        video_streams,
+        key=lambda s: int(s.get("width", 0)) * int(s.get("height", 0)),
+    )
 
     width = int(video_stream.get("width", 0))
     height = int(video_stream.get("height", 0))
@@ -171,6 +177,12 @@ def validate_and_ingest(video_paths: List[str]) -> List[VideoMetadata]:
             raise ValueError(f"'{path}' has no audio stream. Audio is required for sync.")
         if meta.fps <= 0:
             raise ValueError(f"'{path}' has invalid FPS: {meta.fps}")
+        if min(meta.width, meta.height) < 480:
+            raise ValueError(
+                f"'{path}' video resolution {meta.resolution} is too low. "
+                f"Minimum short-side is 480px. This file may be an audio-only "
+                f"companion or a thumbnail track rather than a camera angle."
+            )
 
         print(
             f"[ingestion]   ✓ {meta.resolution} @ {meta.fps}fps | "
