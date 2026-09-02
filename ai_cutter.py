@@ -452,10 +452,12 @@ def _rekognition_score_frames(
 
     # Labels that boost score per event type
     BOOST_LABELS: Dict[EventType, List[str]] = {
-        EventType.CHEER:   ["Cheerleading", "Gymnastics", "Dance", "Jumping", "Acrobatics", "Crowd"],
-        EventType.SPORT:   ["Sport", "Ball", "Running", "Jumping", "Athlete", "Competition"],
-        EventType.CONCERT: ["Concert", "Performance", "Music", "Crowd", "Stage", "Microphone"],
-        EventType.DANCE:   ["Dance", "Dancing", "Performance", "Person", "Stage", "Choreography"],
+        EventType.CHEER:       ["Cheerleading", "Gymnastics", "Dance", "Jumping", "Acrobatics", "Crowd"],
+        EventType.SPORT:       ["Sport", "Ball", "Running", "Jumping", "Athlete", "Competition"],
+        EventType.CONCERT:     ["Concert", "Performance", "Music", "Crowd", "Stage", "Microphone"],
+        EventType.DANCE:       ["Dance", "Dancing", "Performance", "Person", "Stage", "Choreography"],
+        EventType.WEDDING:     ["Wedding", "Bride", "Ceremony", "Couple", "Ring", "Bouquet", "Kiss", "Hug", "Emotion"],
+        EventType.SPOKEN_WORD: ["Person", "Speech", "Microphone", "Podium", "Crowd", "Audience", "Stage"],
     }
     boost_labels = BOOST_LABELS.get(event_type, [])
 
@@ -625,11 +627,98 @@ def _concert_angle_score(
     return float(score)
 
 
+def _dance_angle_score(
+    sig: AngleSignals,
+    frame_idx: int,
+    strategy: CuttingStrategy,
+) -> float:
+    i = min(frame_idx, len(sig.audio_energy) - 1)
+    score = (
+        sig.motion_score[i] * 0.45 +
+        (0.25 if sig.beat_frames[i] else 0.0) +
+        sig.audio_energy[i] * 0.15
+    )
+    if strategy == CuttingStrategy.REKOGNITION and sig.rek_score is not None:
+        score += sig.rek_score[i] * 0.15
+    else:
+        score += sig.motion_score[i] * 0.15
+    return float(score)
+
+
+def _wedding_angle_score(
+    sig: AngleSignals,
+    frame_idx: int,
+    strategy: CuttingStrategy,
+) -> float:
+    """
+    Score an angle for wedding reception content.
+
+    Wedding editors hold on emotional moments — faces, reactions, the couple.
+    Motion is low; the primary signals are face presence (Rekognition) and
+    audio energy peaks (speeches, laughter, music swells). Cuts are infrequent
+    and deliberate — MIN/MAX_CUT_DURATION are respected but the engine naturally
+    holds longer because scores are stable rather than spiky.
+
+    Weights:
+        - Audio energy  0.45  (speeches, vows, laughter, music swells)
+        - Rek score     0.35  (face count + emotional label detection)
+        - Motion score  0.10  (gentle movement — first dance, hugs)
+        - Beat aligned  0.10  (music-driven moments like first dance)
+    """
+    i = min(frame_idx, len(sig.audio_energy) - 1)
+    score = (
+        sig.audio_energy[i] * 0.45 +
+        (0.10 if sig.beat_frames[i] else 0.0) +
+        sig.motion_score[i] * 0.10
+    )
+    if strategy == CuttingStrategy.REKOGNITION and sig.rek_score is not None:
+        score += sig.rek_score[i] * 0.35
+    else:
+        # Without Rekognition, audio energy is the best proxy for emotional peaks
+        score += sig.audio_energy[i] * 0.35
+    return float(score)
+
+
+def _spoken_word_angle_score(
+    sig: AngleSignals,
+    frame_idx: int,
+    strategy: CuttingStrategy,
+) -> float:
+    """
+    Score an angle for spoken word / panel / lecture content.
+
+    Spoken word editors cut on speaker changes and reaction shots. Motion is
+    near-zero; the dominant signal is audio energy (who is speaking loudest /
+    closest). Cuts happen on natural pauses — the beat detector picks up
+    rhythmic speech cadence as a proxy for breath boundaries.
+
+    Weights:
+        - Audio energy  0.60  (proximity to active speaker — primary signal)
+        - Beat aligned  0.20  (breath/pause boundaries in speech cadence)
+        - Rek score     0.15  (face presence — prefer angles showing the speaker)
+        - Motion score  0.05  (gestures, minimal)
+    """
+    i = min(frame_idx, len(sig.audio_energy) - 1)
+    score = (
+        sig.audio_energy[i] * 0.60 +
+        (0.20 if sig.beat_frames[i] else 0.0) +
+        sig.motion_score[i] * 0.05
+    )
+    if strategy == CuttingStrategy.REKOGNITION and sig.rek_score is not None:
+        score += sig.rek_score[i] * 0.15
+    else:
+        score += sig.audio_energy[i] * 0.15
+    return float(score)
+
+
 # Map event type to its scoring function
 _SCORE_FN = {
-    EventType.CHEER:   _cheer_angle_score,
-    EventType.SPORT:   _sport_angle_score,
-    EventType.CONCERT: _concert_angle_score,
+    EventType.CHEER:       _cheer_angle_score,
+    EventType.SPORT:       _sport_angle_score,
+    EventType.CONCERT:     _concert_angle_score,
+    EventType.DANCE:       _dance_angle_score,
+    EventType.WEDDING:     _wedding_angle_score,
+    EventType.SPOKEN_WORD: _spoken_word_angle_score,
 }
 
 

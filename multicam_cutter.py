@@ -248,6 +248,10 @@ def assign_transition_themes(
             cycle = ["hard_cut", "chroma_pop", "neon_glow"]
         elif profile == "sport":
             cycle = ["hard_cut", "chroma_pop", "flash_punch"]
+        elif profile == "wedding":
+            cycle = ["dissolve"]
+        elif profile == "spoken_word":
+            cycle = ["hard_cut"]
         else:
             cycle = ["hard_cut", "flash_punch", "chroma_pop"]
     elif intensity == "cinematic":
@@ -255,6 +259,10 @@ def assign_transition_themes(
             cycle = ["neon_glow", "flash_punch", "chroma_pop", "whip_blur"]
         elif profile == "sport":
             cycle = ["whip_blur", "flash_punch", "chroma_pop", "neon_glow"]
+        elif profile == "wedding":
+            cycle = ["dissolve", "hard_cut", "dissolve", "hard_cut"]
+        elif profile == "spoken_word":
+            cycle = ["hard_cut", "dissolve"]
         else:
             cycle = ["flash_punch", "whip_blur", "neon_glow", "chroma_pop"]
     else:
@@ -262,6 +270,10 @@ def assign_transition_themes(
             cycle = ["hard_cut", "whip_blur", "flash_punch", "chroma_pop"]
         elif profile == "concert":
             cycle = ["hard_cut", "neon_glow", "flash_punch", "chroma_pop"]
+        elif profile == "wedding":
+            cycle = ["dissolve", "hard_cut"]
+        elif profile == "spoken_word":
+            cycle = ["hard_cut"]
         else:
             cycle = ["hard_cut", "flash_punch", "whip_blur", "neon_glow"]
 

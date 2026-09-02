@@ -68,7 +68,7 @@ FREE_TIER_STRATEGY  = os.environ.get("FREE_TIER_STRATEGY",  "local")
 PAID_TIER_STRATEGY  = os.environ.get("PAID_TIER_STRATEGY",  "rekognition")
 
 # Supported event types
-EVENT_TYPES = ["cheer", "sport", "concert", "dance"]
+EVENT_TYPES = ["cheer", "sport", "concert", "dance", "wedding", "spoken_word"]
 
 # Default Rekognition sample rate — analyze every Nth frame
 # Lower N = higher quality, higher cost. Configurable per job.

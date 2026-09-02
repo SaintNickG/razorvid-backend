@@ -21,10 +21,12 @@ class JobStatus(str, Enum):
 
 
 class EventType(str, Enum):
-    CHEER   = "cheer"
-    SPORT   = "sport"
-    CONCERT = "concert"
-    DANCE   = "dance"
+    CHEER        = "cheer"
+    SPORT        = "sport"
+    CONCERT      = "concert"
+    DANCE        = "dance"
+    WEDDING      = "wedding"
+    SPOKEN_WORD  = "spoken_word"
 
 
 class CuttingStrategy(str, Enum):

@@ -66,7 +66,7 @@ class RenderRequest(BaseModel):
     target_height:           int   = Field(default=DEFAULT_TARGET_HEIGHT, gt=0)
     target_fps:              int   = Field(default=DEFAULT_TARGET_FPS, gt=0)
     cutting_strategy:        str   = Field(default="local", pattern="^(local|rekognition|interval)$")
-    event_type:              str   = Field(default="cheer", pattern="^(cheer|sport|concert|dance)$")
+    event_type:              str   = Field(default="cheer", pattern="^(cheer|sport|concert|dance|wedding|spoken_word)$")
     effect_intensity:        str   = Field(default="balanced", pattern="^(subtle|balanced|cinematic)$")
     transition_style:        str   = Field(default="cut", pattern="^(auto|cut|dissolve|flash|slide|stylized)$")
     rekognition_sample_rate: int   = Field(default=15, ge=1, le=60)
