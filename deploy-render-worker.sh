@@ -63,7 +63,9 @@ jq -n --arg input "$INPUT_BUCKET" --arg output "$OUTPUT_BUCKET" --arg queue "$QU
     {Effect:"Allow",Action:["s3:GetObject","s3:ListBucket"],Resource:[("arn:aws:s3:::" + $input), ("arn:aws:s3:::" + $input + "/*")]},
     {Effect:"Allow",Action:["s3:PutObject","s3:GetObject","s3:ListBucket"],Resource:[("arn:aws:s3:::" + $output), ("arn:aws:s3:::" + $output + "/*")]},
     {Effect:"Allow",Action:["dynamodb:PutItem","dynamodb:GetItem","dynamodb:UpdateItem","dynamodb:BatchWriteItem","dynamodb:Scan"],Resource:[("arn:aws:dynamodb:" + $region + ":" + $account + ":table/multicam-jobs"), ("arn:aws:dynamodb:" + $region + ":" + $account + ":table/" + $projects)]},
-    {Effect:"Allow",Action:["sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes","sqs:ChangeMessageVisibility"],Resource:$queue}
+    {Effect:"Allow",Action:["sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes","sqs:ChangeMessageVisibility"],Resource:$queue},
+    {Effect:"Allow",Action:["ses:SendEmail"],Resource:"*"},
+    {Effect:"Allow",Action:["cognito-idp:AdminGetUser"],Resource:("arn:aws:cognito-idp:" + $region + ":" + $account + ":userpool/*")}
   ]}' > "$ACCESS_POLICY"
 aws iam put-role-policy --role-name "$WORKER_ROLE_NAME" --policy-name RazorVidRenderWorkerAccess --policy-document "file://${ACCESS_POLICY}"
 
@@ -74,7 +76,11 @@ aws ecr get-login-password --region "$AWS_REGION" \
 docker build --platform linux/amd64 --provenance=false -f Dockerfile.worker -t "${ECR_URI}:${IMAGE_TAG}" .
 docker push "${ECR_URI}:${IMAGE_TAG}"
 
-ENVIRONMENT="Variables={ENV=aws,NUMBA_CACHE_DIR=/tmp/numba-cache,DYNAMODB_TABLE=${DYNAMODB_TABLE},S3_INPUT_BUCKET=${INPUT_BUCKET},S3_OUTPUT_BUCKET=${OUTPUT_BUCKET}}"
+SES_FROM_EMAIL="${SES_FROM_EMAIL:-}"
+COGNITO_USER_POOL_ID="${COGNITO_USER_POOL_ID:-}"
+APP_URL="${APP_URL:-https://razorvid.com}"
+
+ENVIRONMENT="Variables={ENV=aws,NUMBA_CACHE_DIR=/tmp/numba-cache,DYNAMODB_TABLE=${DYNAMODB_TABLE},S3_INPUT_BUCKET=${INPUT_BUCKET},S3_OUTPUT_BUCKET=${OUTPUT_BUCKET},PROJECTS_DYNAMODB_TABLE=${PROJECTS_DYNAMODB_TABLE},SES_FROM_EMAIL=${SES_FROM_EMAIL},COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID},NEXT_PUBLIC_APP_URL=${APP_URL}}"
 if aws lambda get-function --function-name "$FUNCTION_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
   aws lambda update-function-code --function-name "$FUNCTION_NAME" --image-uri "${ECR_URI}:${IMAGE_TAG}" --region "$AWS_REGION" >/dev/null
   aws lambda wait function-updated-v2 --function-name "$FUNCTION_NAME" --region "$AWS_REGION"

@@ -37,6 +37,7 @@ from urllib.parse import urlparse
 import boto3
 
 from multicam_pipeline.job_schema import MulticamJob, JobStatus
+from multicam_pipeline.notify import send_render_complete, send_render_failed
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +49,7 @@ from multicam_pipeline.job_schema import MulticamJob, JobStatus
 _region        = os.environ.get("AWS_REGION", "us-east-1")
 _dynamodb_table = os.environ.get("DYNAMODB_TABLE", "multicam-jobs")
 _output_bucket  = os.environ.get("S3_OUTPUT_BUCKET", "multicam-output")
+_projects_table = os.environ.get("PROJECTS_DYNAMODB_TABLE", "")
 
 s3         = boto3.client("s3", region_name=_region)
 dynamodb   = boto3.resource("dynamodb", region_name=_region)
@@ -71,6 +73,20 @@ def _upsert_job_status(job: MulticamJob) -> None:
     payload = job.to_dict()
     _ddb_table.put_item(Item=json.loads(json.dumps(payload), parse_float=Decimal))
     print(f"[aws_handler] DynamoDB updated: job={job.job_id} status={job.status}")
+
+
+def _get_project(project_id: str) -> dict | None:
+    """Fetch a project record from DynamoDB. Returns None if unavailable."""
+    if not _projects_table or not project_id:
+        return None
+    try:
+        table = dynamodb.Table(_projects_table)
+        resp = table.get_item(Key={"pk": f"PROJECT#{project_id}", "sk": "PROFILE"})
+        item = resp.get("Item")
+        return item.get("project") if item else None
+    except Exception as exc:
+        print(f"[aws_handler] Could not fetch project {project_id}: {exc}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +297,12 @@ def lambda_handler(event: dict, context: Any) -> dict:
 
             print(f"[aws_handler] Job {job.job_id} complete → {job.output_path}")
 
+            # --- Notify project owner ---
+            if job.project_id:
+                project = _get_project(job.project_id)
+                if project:
+                    send_render_complete(job.job_id, project.get("name", "your project"), project.get("owner_id", ""))
+
         except Exception as exc:
             error_detail = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
             print(f"[aws_handler] Job failed (SQS message {message_id}):\n{error_detail}")
@@ -289,6 +311,12 @@ def lambda_handler(event: dict, context: Any) -> dict:
             if job:
                 job.mark_failed(error_detail)
                 _upsert_job_status(job)
+
+                # --- Notify project owner of failure ---
+                if job.project_id:
+                    project = _get_project(job.project_id)
+                    if project:
+                        send_render_failed(job.job_id, project.get("name", "your project"), project.get("owner_id", ""))
 
             # Report this message as a batch failure so SQS retries it
             batch_failures.append({"itemIdentifier": message_id})
