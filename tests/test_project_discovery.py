@@ -65,6 +65,11 @@ def test_discovery_returns_only_safe_match_fields_and_owner_can_approve(monkeypa
         {"sub": "owner"},
     ))
     assert "requester" in projects._projects[project_id]["members"]
+    results_after_approval = asyncio.run(projects.discover_projects(
+        projects.DiscoverySearchRequest(recorded_at=now, latitude=42.3601, longitude=-71.0589),
+        {"sub": "requester"},
+    ))
+    assert results_after_approval == {"matches": []}
 
 
 def test_discovery_excludes_out_of_window_and_unauthorized_owner_actions(monkeypatch, tmp_path):

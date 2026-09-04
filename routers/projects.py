@@ -482,6 +482,8 @@ async def discover_projects(req: DiscoverySearchRequest, _claims: dict = Depends
     recorded_at = req.recorded_at.astimezone(timezone.utc)
     matches = []
     for project in _projects.values():
+        if requester_id in project.get("members", []):
+            continue
         settings = _discovery_settings(project)
         if not settings.get("discoverable"):
             continue
