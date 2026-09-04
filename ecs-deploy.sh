@@ -26,6 +26,7 @@ AUTH_ALLOW_UNVERIFIED_TOKENS="${AUTH_ALLOW_UNVERIFIED_TOKENS:-false}"
 ADMIN_USER_IDS="${ADMIN_USER_IDS:-}"
 ADMIN_GROUPS="${ADMIN_GROUPS:-admin}"
 BILLING_DYNAMODB_TABLE="${BILLING_DYNAMODB_TABLE:-}"
+DISCOVERY_TOKEN_SECRET_ARN="${DISCOVERY_TOKEN_SECRET_ARN:-}"
 LOG_GROUP="${LOG_GROUP:-/ecs/razorvid-api}"
 ALB_NAME="${ALB_NAME:-razorvid-api-alb}"
 TARGET_GROUP_NAME="${TARGET_GROUP_NAME:-razorvid-api-tg}"
@@ -113,7 +114,7 @@ EXECUTION_ROLE_ARN=$(ensure_role "$EXECUTION_ROLE_NAME" arn:aws:iam::aws:policy/
 TASK_ROLE_ARN=$(ensure_role "$TASK_ROLE_NAME" "")
 aws iam put-role-policy --role-name "$TASK_ROLE_NAME" --policy-name RazorVidRuntimeAccess --policy-document "file://${TASK_POLICY}"
 
-SECRET_ARNS=$(jq -n --arg stripe "${STRIPE_SECRET_KEY_ARN:-}" --arg webhook "${STRIPE_WEBHOOK_SECRET_ARN:-}" --arg prices "${STRIPE_PRICE_IDS_JSON_ARN:-}" '[ $stripe, $webhook, $prices ] | map(select(length > 0))')
+SECRET_ARNS=$(jq -n --arg stripe "${STRIPE_SECRET_KEY_ARN:-}" --arg webhook "${STRIPE_WEBHOOK_SECRET_ARN:-}" --arg prices "${STRIPE_PRICE_IDS_JSON_ARN:-}" --arg discovery "$DISCOVERY_TOKEN_SECRET_ARN" '[ $stripe, $webhook, $prices, $discovery ] | map(select(length > 0))')
 if [ "$SECRET_ARNS" != "[]" ]; then
   jq -n --argjson resources "$SECRET_ARNS" \
     '{Version:"2012-10-17",Statement:[{Effect:"Allow",Action:["secretsmanager:GetSecretValue"],Resource:$resources}]}' \
@@ -137,7 +138,8 @@ jq -n \
 for secret_spec in \
   "STRIPE_SECRET_KEY:${STRIPE_SECRET_KEY_ARN:-}" \
   "STRIPE_WEBHOOK_SECRET:${STRIPE_WEBHOOK_SECRET_ARN:-}" \
-  "STRIPE_PRICE_IDS_JSON:${STRIPE_PRICE_IDS_JSON_ARN:-}"; do
+  "STRIPE_PRICE_IDS_JSON:${STRIPE_PRICE_IDS_JSON_ARN:-}" \
+  "DISCOVERY_TOKEN_SECRET:${DISCOVERY_TOKEN_SECRET_ARN:-}"; do
   secret_name="${secret_spec%%:*}"
   secret_arn="${secret_spec#*:}"
   if [ -n "$secret_arn" ]; then
