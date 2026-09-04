@@ -300,7 +300,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
             # --- Notify project owner ---
             if job.project_id:
                 project = _get_project(job.project_id)
-                if project:
+                if project and project.get("notification_settings", {}).get("render_outcome", False):
                     send_render_complete(job.job_id, project.get("name", "your project"), project.get("owner_id", ""))
 
         except Exception as exc:
@@ -315,7 +315,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
                 # --- Notify project owner of failure ---
                 if job.project_id:
                     project = _get_project(job.project_id)
-                    if project:
+                    if project and project.get("notification_settings", {}).get("render_outcome", False):
                         send_render_failed(job.job_id, project.get("name", "your project"), project.get("owner_id", ""))
 
             # Report this message as a batch failure so SQS retries it

@@ -34,6 +34,7 @@ from pydantic import BaseModel
 from multicam_pipeline.auth import principal_id_from_claims, require_auth, resolve_actor_id
 from multicam_pipeline.config import AWS_REGION, EVENT_TYPES, IS_AWS
 from multicam_pipeline.routers.upload import _save_local, _save_s3, _validate_extension
+from multicam_pipeline.notify import send_angle_uploaded, send_member_joined
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -173,12 +174,26 @@ class AddUploadRequest(BaseModel):
     terms_accepted: bool = False
 
 
+class NotificationSettingsRequest(BaseModel):
+    angle_uploaded: bool
+    member_joined: bool
+    render_outcome: bool
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _notification_settings(project: dict) -> dict:
+    return project.setdefault("notification_settings", {
+        "angle_uploaded": False,
+        "member_joined": False,
+        "render_outcome": False,
+    })
 
 
 def _short_code() -> str:
@@ -324,6 +339,11 @@ async def create_project(req: CreateProjectRequest, request: Request, _claims: d
         "uploads":     [],          # list of {upload_id, user_id, files}
         "contributor_names": {owner_id: owner_id},
         "render_contributions": {},
+        "notification_settings": {
+            "angle_uploaded": False,
+            "member_joined": False,
+            "render_outcome": False,
+        },
         "job_ids":     [],
         "created_at":  _now(),
         "updated_at":  _now(),
@@ -404,6 +424,11 @@ async def add_guest_upload(
     })
     project["updated_at"] = _now()
     _persist_store()
+    settings = _notification_settings(project)
+    if settings["member_joined"]:
+        send_member_joined(project["name"], project["owner_id"], guest_name or "Guest")
+    if settings["angle_uploaded"]:
+        send_angle_uploaded(project["name"], project["owner_id"], guest_name or "Guest", 1)
     return _guest_project_response(project)
 
 
@@ -506,8 +531,13 @@ async def join_project(req: JoinProjectRequest, request: Request, _claims: dict 
         contributor_names = project.setdefault("contributor_names", {})
         contributor_names.setdefault(actor_id, actor_id)
         project["updated_at"] = _now()
+        joined = True
+    else:
+        joined = False
 
     _persist_store()
+    if joined and _notification_settings(project)["member_joined"]:
+        send_member_joined(project["name"], project["owner_id"], contributor_names.get(actor_id, actor_id))
 
     return _project_response(project, request)
 
@@ -537,5 +567,25 @@ async def add_upload(project_id: str, req: AddUploadRequest, request: Request, _
     contributor_names[actor_id] = req.user_name or actor_id
     project["updated_at"] = _now()
     _persist_store()
+    if actor_id != project["owner_id"] and _notification_settings(project)["angle_uploaded"]:
+        send_angle_uploaded(project["name"], project["owner_id"], req.user_name or actor_id, len(req.files))
 
+    return _project_response(project, request)
+
+
+@router.patch("/{project_id}/notification-settings")
+async def update_notification_settings(
+    project_id: str,
+    req: NotificationSettingsRequest,
+    request: Request,
+    _claims: dict = Depends(require_auth),
+):
+    _refresh_store()
+    project = _projects.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    _ensure_owner(project, principal_id_from_claims(_claims))
+    project["notification_settings"] = req.model_dump()
+    project["updated_at"] = _now()
+    _persist_store()
     return _project_response(project, request)

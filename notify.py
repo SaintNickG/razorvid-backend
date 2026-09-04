@@ -45,6 +45,47 @@ def _get_owner_email(owner_id: str) -> str | None:
     return None
 
 
+def send_project_notification(owner_id: str, subject: str, text: str, html: str) -> None:
+    """Send a best-effort project notification to its owner."""
+    if not _from_email:
+        log.info("[notify] SES_FROM_EMAIL not set — skipping notification")
+        return
+    try:
+        email = _get_owner_email(owner_id)
+        if not email:
+            return
+        _ses.send_email(
+            Source=_from_email,
+            Destination={"ToAddresses": [email]},
+            Message={
+                "Subject": {"Data": subject},
+                "Body": {"Text": {"Data": text}, "Html": {"Data": html}},
+            },
+        )
+        log.info("[notify] Project notification sent to %s", email)
+    except Exception as exc:
+        log.warning("[notify] Failed to send project notification: %s", exc)
+
+
+def send_member_joined(project_name: str, owner_id: str, member_name: str) -> None:
+    send_project_notification(
+        owner_id,
+        f"New member joined — {project_name}",
+        f"{member_name} joined your RazorVid project \"{project_name}\".",
+        f"<p><strong>{member_name}</strong> joined your RazorVid project <strong>{project_name}</strong>.</p>",
+    )
+
+
+def send_angle_uploaded(project_name: str, owner_id: str, contributor_name: str, file_count: int) -> None:
+    noun = "angle" if file_count == 1 else "angles"
+    send_project_notification(
+        owner_id,
+        f"New video angle added — {project_name}",
+        f"{contributor_name} added {file_count} video {noun} to your RazorVid project \"{project_name}\".",
+        f"<p><strong>{contributor_name}</strong> added {file_count} video {noun} to your RazorVid project <strong>{project_name}</strong>.</p>",
+    )
+
+
 def send_render_complete(job_id: str, project_name: str, owner_id: str) -> None:
     """Send a render-complete email to the project owner. Never raises."""
     if not _from_email:
