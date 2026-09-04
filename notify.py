@@ -86,6 +86,15 @@ def send_angle_uploaded(project_name: str, owner_id: str, contributor_name: str,
     )
 
 
+def send_join_request_received(project_name: str, owner_id: str, requester_name: str) -> None:
+    send_project_notification(
+        owner_id,
+        f"New join request — {project_name}",
+        f"{requester_name} requested to join your RazorVid project \"{project_name}\".",
+        f"<p><strong>{requester_name}</strong> requested to join your RazorVid project <strong>{project_name}</strong>.</p>",
+    )
+
+
 def send_render_complete(job_id: str, project_name: str, owner_id: str) -> None:
     """Send a render-complete email to the project owner. Never raises."""
     if not _from_email:

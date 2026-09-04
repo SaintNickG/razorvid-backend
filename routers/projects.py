@@ -19,6 +19,11 @@ import json
 import io
 import os
 import uuid
+import base64
+import hashlib
+import hmac
+import math
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -34,7 +39,7 @@ from pydantic import BaseModel
 from multicam_pipeline.auth import principal_id_from_claims, require_auth, resolve_actor_id
 from multicam_pipeline.config import AWS_REGION, EVENT_TYPES, IS_AWS
 from multicam_pipeline.routers.upload import _save_local, _save_s3, _validate_extension
-from multicam_pipeline.notify import send_angle_uploaded, send_member_joined
+from multicam_pipeline.notify import send_angle_uploaded, send_join_request_received, send_member_joined
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -180,6 +185,31 @@ class NotificationSettingsRequest(BaseModel):
     render_outcome: bool
 
 
+class DiscoverySettingsRequest(BaseModel):
+    discoverable: bool = False
+    public_label: Optional[str] = None
+    event_starts_at: Optional[datetime] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    join_request_notifications: bool = False
+
+
+class DiscoverySearchRequest(BaseModel):
+    recorded_at: datetime
+    latitude: float
+    longitude: float
+
+
+class JoinRequestCreateRequest(BaseModel):
+    match_token: str
+    display_name: Optional[str] = None
+    message: Optional[str] = None
+
+
+class JoinRequestDecisionRequest(BaseModel):
+    decision: str
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -194,6 +224,54 @@ def _notification_settings(project: dict) -> dict:
         "member_joined": False,
         "render_outcome": False,
     })
+
+
+def _discovery_settings(project: dict) -> dict:
+    return project.setdefault("discovery_settings", {"discoverable": False})
+
+
+def _distance_km(latitude_a: float, longitude_a: float, latitude_b: float, longitude_b: float) -> float:
+    radius_km = 6371.0088
+    lat_delta = math.radians(latitude_b - latitude_a)
+    lon_delta = math.radians(longitude_b - longitude_a)
+    a = math.sin(lat_delta / 2) ** 2 + math.cos(math.radians(latitude_a)) * math.cos(math.radians(latitude_b)) * math.sin(lon_delta / 2) ** 2
+    return radius_km * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _discovery_secret() -> bytes:
+    secret = os.environ.get("DISCOVERY_TOKEN_SECRET", "").strip()
+    if not secret:
+        raise HTTPException(status_code=503, detail="Project discovery is not configured.")
+    return secret.encode("utf-8")
+
+
+def _create_match_token(project_id: str, requester_id: str) -> str:
+    payload = json.dumps({
+        "project_id": project_id,
+        "requester_id": requester_id,
+        "expires_at": int(time.time()) + 15 * 60,
+    }, separators=(",", ":")).encode()
+    signature = hmac.new(_discovery_secret(), payload, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(payload + b"." + signature).decode().rstrip("=")
+
+
+def _read_match_token(token: str, requester_id: str) -> str:
+    try:
+        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
+        payload, signature = raw.rsplit(b".", 1)
+        expected = hmac.new(_discovery_secret(), payload, hashlib.sha256).digest()
+        if not hmac.compare_digest(signature, expected):
+            raise ValueError("Invalid signature")
+        parsed = json.loads(payload)
+        if parsed.get("requester_id") != requester_id:
+            raise ValueError("Wrong requester")
+        if int(parsed.get("expires_at", 0)) < time.time():
+            raise ValueError("Expired match")
+        return str(parsed["project_id"])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid project match.") from exc
 
 
 def _short_code() -> str:
@@ -344,6 +422,8 @@ async def create_project(req: CreateProjectRequest, request: Request, _claims: d
             "member_joined": False,
             "render_outcome": False,
         },
+        "discovery_settings": {"discoverable": False},
+        "join_requests": [],
         "job_ids":     [],
         "created_at":  _now(),
         "updated_at":  _now(),
@@ -390,6 +470,56 @@ async def get_guest_project(invite_code: str):
     """Return limited project details for a public guest upload link."""
     _refresh_store()
     return _guest_project_response(_project_for_invite(invite_code))
+
+
+@router.post("/discover")
+async def discover_projects(req: DiscoverySearchRequest, _claims: dict = Depends(require_auth)):
+    """Return only safe labels for opt-in projects within 0.5 km and 30 minutes."""
+    _refresh_store()
+    requester_id = principal_id_from_claims(_claims)
+    if not requester_id:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    recorded_at = req.recorded_at.astimezone(timezone.utc)
+    matches = []
+    for project in _projects.values():
+        settings = _discovery_settings(project)
+        if not settings.get("discoverable"):
+            continue
+        try:
+            event_time = datetime.fromisoformat(settings["event_starts_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
+            distance = _distance_km(req.latitude, req.longitude, settings["latitude"], settings["longitude"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if abs((recorded_at - event_time).total_seconds()) <= 30 * 60 and distance <= 0.5:
+            matches.append({
+                "match_token": _create_match_token(project["project_id"], requester_id),
+                "label": settings["public_label"],
+                "event_type": project["event_type"],
+            })
+    return {"matches": matches}
+
+
+@router.post("/join-requests", status_code=201)
+async def create_join_request(req: JoinRequestCreateRequest, _claims: dict = Depends(require_auth)):
+    _refresh_store()
+    requester_id = principal_id_from_claims(_claims)
+    if not requester_id:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    project = _projects.get(_read_match_token(req.match_token, requester_id))
+    if not project or not _discovery_settings(project).get("discoverable"):
+        raise HTTPException(status_code=404, detail="Matching project is no longer available.")
+    if requester_id in project.get("members", []):
+        raise HTTPException(status_code=409, detail="You are already a project member.")
+    requests = project.setdefault("join_requests", [])
+    if any(item.get("requester_id") == requester_id and item.get("status") == "pending" for item in requests):
+        raise HTTPException(status_code=409, detail="You already have a pending request for this project.")
+    request_id = str(uuid.uuid4())
+    requests.append({"request_id": request_id, "requester_id": requester_id, "display_name": (req.display_name or requester_id).strip()[:80], "message": (req.message or "").strip()[:500], "status": "pending", "created_at": _now()})
+    project["updated_at"] = _now()
+    _persist_store()
+    if _discovery_settings(project).get("join_request_notifications"):
+        send_join_request_received(project["name"], project["owner_id"], requests[-1]["display_name"])
+    return {"request_id": request_id, "status": "pending"}
 
 
 @router.post("/share/{invite_code}/uploads")
@@ -586,6 +716,61 @@ async def update_notification_settings(
         raise HTTPException(status_code=404, detail="Project not found.")
     _ensure_owner(project, principal_id_from_claims(_claims))
     project["notification_settings"] = req.model_dump()
+    project["updated_at"] = _now()
+    _persist_store()
+    return _project_response(project, request)
+
+
+@router.patch("/{project_id}/discovery-settings")
+async def update_discovery_settings(project_id: str, req: DiscoverySettingsRequest, request: Request, _claims: dict = Depends(require_auth)):
+    _refresh_store()
+    project = _projects.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    _ensure_owner(project, principal_id_from_claims(_claims))
+    if req.discoverable:
+        label = (req.public_label or "").strip()
+        if len(label) < 8:
+            raise HTTPException(status_code=422, detail="A meaningful event label of at least 8 characters is required.")
+        if req.event_starts_at is None or req.latitude is None or req.longitude is None:
+            raise HTTPException(status_code=422, detail="Event time and approximate location are required for discovery.")
+        if not -90 <= req.latitude <= 90 or not -180 <= req.longitude <= 180:
+            raise HTTPException(status_code=422, detail="Location coordinates are invalid.")
+    project["discovery_settings"] = req.model_dump(mode="json")
+    project["updated_at"] = _now()
+    _persist_store()
+    return _project_response(project, request)
+
+
+@router.get("/{project_id}/join-requests")
+async def list_join_requests(project_id: str, _claims: dict = Depends(require_auth)):
+    _refresh_store()
+    project = _projects.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    _ensure_owner(project, principal_id_from_claims(_claims))
+    return {"requests": project.get("join_requests", [])}
+
+
+@router.patch("/{project_id}/join-requests/{request_id}")
+async def decide_join_request(project_id: str, request_id: str, req: JoinRequestDecisionRequest, request: Request, _claims: dict = Depends(require_auth)):
+    _refresh_store()
+    project = _projects.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    _ensure_owner(project, principal_id_from_claims(_claims))
+    if req.decision not in {"approved", "declined"}:
+        raise HTTPException(status_code=422, detail="Decision must be approved or declined.")
+    join_request = next((item for item in project.get("join_requests", []) if item.get("request_id") == request_id), None)
+    if not join_request:
+        raise HTTPException(status_code=404, detail="Join request not found.")
+    if join_request.get("status") != "pending":
+        raise HTTPException(status_code=409, detail="Join request was already decided.")
+    join_request["status"] = req.decision
+    join_request["decided_at"] = _now()
+    if req.decision == "approved" and join_request["requester_id"] not in project["members"]:
+        project["members"].append(join_request["requester_id"])
+        project.setdefault("contributor_names", {}).setdefault(join_request["requester_id"], join_request["display_name"])
     project["updated_at"] = _now()
     _persist_store()
     return _project_response(project, request)
