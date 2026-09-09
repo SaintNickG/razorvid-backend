@@ -41,6 +41,13 @@ class EffectIntensity(str, Enum):
     CINEMATIC = "cinematic"
 
 
+class OrientationMode(str, Enum):
+    AUTO      = "auto"
+    LANDSCAPE = "landscape"
+    PORTRAIT  = "portrait"
+    NATIVE    = "native"
+
+
 @dataclass
 class MulticamJob:
     """
@@ -76,6 +83,9 @@ class MulticamJob:
     event_type:               EventType       = EventType.CHEER
     effect_intensity:         EffectIntensity = EffectIntensity.BALANCED
     transition_style:         str             = "cut"
+    orientation_mode:         OrientationMode = OrientationMode.AUTO
+    orientation_crop_depth:   int             = 100
+    creator_video_paths:      List[str]        = field(default_factory=list)
     rekognition_sample_rate:  int             = 15
     audio_source_override:    Optional[str]   = None
     selected_audio_source_path: Optional[str] = None
@@ -105,6 +115,9 @@ class MulticamJob:
             "event_type":              self.event_type.value,
             "effect_intensity":        self.effect_intensity.value,
             "transition_style":        self.transition_style,
+            "orientation_mode":        self.orientation_mode.value,
+            "orientation_crop_depth":  self.orientation_crop_depth,
+            "creator_video_paths":     self.creator_video_paths,
             "rekognition_sample_rate": self.rekognition_sample_rate,
             "audio_source_override":   self.audio_source_override,
             "selected_audio_source_path": self.selected_audio_source_path,
@@ -131,6 +144,9 @@ class MulticamJob:
             event_type               = EventType(data.get("event_type", "cheer")),
             effect_intensity         = EffectIntensity(data.get("effect_intensity", "balanced")),
             transition_style         = data.get("transition_style", "cut"),
+            orientation_mode         = OrientationMode(data.get("orientation_mode", "auto")),
+            orientation_crop_depth   = int(data.get("orientation_crop_depth", 100)),
+            creator_video_paths      = list(data.get("creator_video_paths") or []),
             rekognition_sample_rate  = int(data.get("rekognition_sample_rate", 15)),
             audio_source_override     = data.get("audio_source_override"),
             selected_audio_source_path = data.get("selected_audio_source_path"),

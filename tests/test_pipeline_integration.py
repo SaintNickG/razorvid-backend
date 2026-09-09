@@ -32,6 +32,29 @@ def test_ingestion_picks_largest_video_stream(monkeypatch: pytest.MonkeyPatch) -
     assert meta.fps == 30.0
 
 
+def test_ingestion_applies_phone_rotation_to_display_orientation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from multicam_pipeline.ingestion import extract_metadata
+
+    fake_probe = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "width": 1920,
+                "height": 1080,
+                "r_frame_rate": "30/1",
+                "side_data_list": [{"rotation": -90}],
+            },
+            {"codec_type": "audio", "channels": 2},
+        ],
+        "format": {"duration": "10.0"},
+    }
+    monkeypatch.setattr("multicam_pipeline.ingestion._run_ffprobe", lambda _: fake_probe)
+    monkeypatch.setattr("os.path.isfile", lambda _: True)
+
+    meta = extract_metadata("phone.mov")
+    assert (meta.width, meta.height) == (1080, 1920)
+
+
 def test_ingestion_rejects_thumbnail_track_only_file(monkeypatch: pytest.MonkeyPatch) -> None:
     """validate_and_ingest must reject a file whose only video stream is a thumbnail track."""
     from multicam_pipeline.ingestion import validate_and_ingest
@@ -104,6 +127,137 @@ def test_ffmpeg_command_opens_each_source_once() -> None:
     assert video_trims == 60, f"Expected 60 video trims, got {video_trims}"
     assert filter_complex.count("atrim=start=") == 60  # audio trims
     assert filter_complex.count("setpts=PTS-STARTPTS") >= 60
+
+
+def test_orientation_crop_depth_only_zooms_opposing_angles() -> None:
+    from multicam_pipeline.rendering import build_ffmpeg_command
+
+    segments = [
+        CutSegment(0.0, 2.0, "landscape.mp4", 0.0),
+        CutSegment(2.0, 4.0, "portrait.mp4", 0.0),
+    ]
+    command = build_ffmpeg_command(
+        segments,
+        "output.mp4",
+        "libx264",
+        target_width=1920,
+        target_height=1080,
+        orientation_mode="landscape",
+        orientation_crop_depth=100,
+        source_dimensions={
+            "landscape.mp4": (1920, 1080),
+            "portrait.mp4": (1080, 1920),
+        },
+    )
+    filters = command[command.index("-filter_complex") + 1]
+    assert "scale=1920:1080" in filters
+    assert "scale=1920:3412" in filters
+    assert "crop=w='min(iw,1920)':h='min(ih,1080)'" in filters
+
+
+def test_native_orientation_preserves_full_opposing_frame() -> None:
+    from multicam_pipeline.rendering import build_ffmpeg_command
+
+    segments = [CutSegment(0.0, 2.0, "portrait.mp4", 0.0)]
+    command = build_ffmpeg_command(
+        segments,
+        "output.mp4",
+        "libx264",
+        target_width=1920,
+        target_height=1080,
+        orientation_mode="native",
+        orientation_crop_depth=100,
+        source_dimensions={"portrait.mp4": (1080, 1920)},
+    )
+    filters = command[command.index("-filter_complex") + 1]
+    assert "scale=606:1080" in filters
+    assert "pad=1920:1080" in filters
+
+
+def test_auto_orientation_requires_creator_portrait_and_half_portrait() -> None:
+    from multicam_pipeline.ingestion import VideoMetadata
+    from multicam_pipeline.job_schema import MulticamJob
+    from multicam_pipeline.pipeline import _resolve_output_orientation
+
+    metadata = [
+        VideoMetadata("owner.mov", 10, 30, 1080, 1920, 2),
+        VideoMetadata("guest-a.mov", 10, 30, 1080, 1920, 2),
+        VideoMetadata("guest-b.mov", 10, 30, 1920, 1080, 2),
+        VideoMetadata("guest-c.mov", 10, 30, 1920, 1080, 2),
+    ]
+    job = MulticamJob([item.path for item in metadata], "output.mp4", creator_video_paths=["owner.mov"])
+    assert _resolve_output_orientation(metadata, job) == "portrait"
+
+    job.creator_video_paths = ["guest-b.mov"]
+    assert _resolve_output_orientation(metadata, job) == "landscape"
+
+
+def test_metadata_sync_window_requires_complete_plausible_overlap() -> None:
+    from multicam_pipeline.audio_sync import _metadata_window_plan
+
+    paths = ["cam-a.mov", "cam-b.mov"]
+    plan = _metadata_window_plan(
+        paths,
+        {"cam-a.mov": 1_700_000_000.0, "cam-b.mov": 1_700_000_010.0},
+        {"cam-a.mov": 120.0, "cam-b.mov": 120.0},
+    )
+    assert plan == ({"cam-a.mov": 10.0, "cam-b.mov": 0.0}, 45.0)
+    assert _metadata_window_plan(paths, {"cam-a.mov": 1_700_000_000.0}, {path: 120.0 for path in paths}) is None
+    assert _metadata_window_plan(
+        paths,
+        {"cam-a.mov": 1_700_000_000.0, "cam-b.mov": 1_700_020_000.0},
+        {path: 120.0 for path in paths},
+    ) is None
+
+
+def test_metadata_window_reconstructs_full_offset_without_changing_sign(monkeypatch: pytest.MonkeyPatch) -> None:
+    import multicam_pipeline.audio_sync as audio_sync
+
+    monkeypatch.setattr(
+        audio_sync,
+        "_align_with_window_consensus",
+        lambda _sig, _ref: audio_sync.AlignmentResult(0.25, 0.9, 3.0, 0.01, 1.0, 4),
+    )
+    attempt = audio_sync._compute_offsets_for_reference(
+        ["reference.mov", "camera.mov"],
+        [np.ones(1000), np.ones(1000)],
+        audio_sync.AudioReferenceChoice("reference.mov", 0, 1.0),
+        audio_sync._resolve_match_thresholds("concert", "local"),
+        audio_start_offsets={"reference.mov": 0.0, "camera.mov": 10.0},
+    )
+    assert attempt.offsets["camera.mov"] == pytest.approx(-10.25)
+
+
+def test_weak_metadata_window_falls_back_to_full_track(monkeypatch: pytest.MonkeyPatch) -> None:
+    import multicam_pipeline.audio_sync as audio_sync
+
+    paths = ["reference.mov", "camera.mov"]
+    extraction_calls = []
+    monkeypatch.setattr(audio_sync, "_metadata_window_plan", lambda *_: ({path: 0.0 for path in paths}, 45.0))
+
+    def fake_extract(path, sr=audio_sync.TARGET_SR, start_seconds=0.0, duration_seconds=None):
+        extraction_calls.append((path, duration_seconds))
+        return np.ones(1000)
+
+    monkeypatch.setattr(audio_sync, "_extract_mono_audio", fake_extract)
+    reference = audio_sync.AudioReferenceChoice(paths[0], 0, 1.0)
+    weak = audio_sync.ReferenceAttempt(reference, {paths[0]: 0.0, paths[1]: 0.0}, {}, [(paths[1], 0, 0, 0, 0, 0)], 0.0)
+    strong_result = audio_sync.AlignmentResult(-1.2, 0.9, 3.0, 0.01, 1.0, 4)
+    strong = audio_sync.ReferenceAttempt(reference, {paths[0]: 0.0, paths[1]: -1.2}, {paths[0]: strong_result, paths[1]: strong_result}, [], 0.9)
+    attempts = iter([weak, strong])
+    monkeypatch.setattr(audio_sync, "_evaluate_reference_attempts", lambda *_args, **_kwargs: next(attempts))
+
+    offsets, selected = audio_sync.align_videos_with_reference(
+        paths,
+        metadata_creation_times={path: 1_700_000_000.0 for path in paths},
+        video_durations={path: 120.0 for path in paths},
+    )
+    assert offsets[paths[1]] == pytest.approx(-1.2)
+    assert selected == paths[0]
+    assert extraction_calls == [
+        (paths[0], 45.0), (paths[1], 45.0),
+        (paths[0], None), (paths[1], None),
+    ]
 
 
 def _missing_prerequisites() -> list[str]:

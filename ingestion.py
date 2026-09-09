@@ -9,6 +9,7 @@ import subprocess
 import json
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import List, Optional
 
 
@@ -32,6 +33,7 @@ class VideoMetadata:
     width: int
     height: int
     audio_channels: int
+    creation_time: Optional[float] = None
 
     @property
     def has_audio(self) -> bool:
@@ -125,11 +127,29 @@ def extract_metadata(video_path: str) -> VideoMetadata:
 
     width = int(video_stream.get("width", 0))
     height = int(video_stream.get("height", 0))
+    rotation = int(video_stream.get("tags", {}).get("rotate", 0) or 0)
+    for side_data in video_stream.get("side_data_list", []) or []:
+        if "rotation" in side_data:
+            rotation = int(side_data["rotation"] or 0)
+            break
+    if abs(rotation) % 180 == 90:
+        width, height = height, width
     fps = _parse_fps(video_stream.get("r_frame_rate", "0/1"))
 
     # Extract audio stream properties
     audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
     audio_channels = int(audio_stream.get("channels", 0)) if audio_stream else 0
+
+    creation_time = None
+    creation_value = (
+        fmt.get("tags", {}).get("creation_time")
+        or video_stream.get("tags", {}).get("creation_time")
+    )
+    if creation_value:
+        try:
+            creation_time = datetime.fromisoformat(str(creation_value).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            creation_time = None
 
     return VideoMetadata(
         path=video_path,
@@ -138,6 +158,7 @@ def extract_metadata(video_path: str) -> VideoMetadata:
         width=width,
         height=height,
         audio_channels=audio_channels,
+        creation_time=creation_time,
     )
 
 

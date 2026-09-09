@@ -184,6 +184,13 @@ def _run_pipeline(job: MulticamJob, local_video_paths: list, local_output_path: 
         event_type=job.event_type,
         effect_intensity=job.effect_intensity,
         transition_style=job.transition_style,
+        orientation_mode=job.orientation_mode,
+        orientation_crop_depth=job.orientation_crop_depth,
+        creator_video_paths=[
+            local_video_paths[index]
+            for index, source in enumerate(job.video_paths)
+            if source in job.creator_video_paths
+        ],
         rekognition_sample_rate=job.rekognition_sample_rate,
         audio_source_override=job.audio_source_override,
         selected_audio_source_path=job.selected_audio_source_path,

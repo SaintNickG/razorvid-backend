@@ -24,7 +24,7 @@ import os
 import subprocess
 import platform
 import shutil
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from multicam_pipeline.multicam_cutter import CutSegment, assign_transition_themes
 
 
@@ -244,6 +244,9 @@ def _build_filtergraph(
     audio_source_input_index: Optional[int] = None,
     audio_source_offset: float = 0.0,
     audio_source_duration: Optional[float] = None,
+    orientation_mode: str = "native",
+    orientation_crop_depth: int = 100,
+    source_dimensions: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> tuple[List[str], str]:
     """
     Build the FFmpeg -filter_complex string for a concat-based multicam render.
@@ -272,6 +275,29 @@ def _build_filtergraph(
     """
     filter_lines: List[str] = []
     n = len(segments)
+
+    def _orientation_chain(source_path: str) -> str:
+        dimensions = (source_dimensions or {}).get(source_path)
+        if not dimensions:
+            return (
+                f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
+                f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2"
+            )
+        source_width, source_height = dimensions
+        source_is_portrait = source_height > source_width
+        target_is_portrait = target_height > target_width
+        opposing = source_is_portrait != target_is_portrait
+        depth = max(0.0, min(1.0, orientation_crop_depth / 100.0))
+        contain_scale = min(target_width / source_width, target_height / source_height)
+        cover_scale = max(target_width / source_width, target_height / source_height)
+        scale = contain_scale + (cover_scale - contain_scale) * depth if opposing and orientation_mode != "native" else contain_scale
+        scaled_width = max(2, int(source_width * scale) // 2 * 2)
+        scaled_height = max(2, int(source_height * scale) // 2 * 2)
+        return (
+            f"scale={scaled_width}:{scaled_height},"
+            f"crop=w='min(iw,{target_width})':h='min(ih,{target_height})':x='(iw-ow)/2':y='(ih-oh)/2',"
+            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2"
+        )
 
     def _themed_chain(theme_name: str) -> str:
         # Keep effects duration-neutral so concat timing remains stable.
@@ -307,8 +333,7 @@ def _build_filtergraph(
             f"[{src_idx}:v]"
             f"trim=start={seg.source_start:.6f}:end={seg.source_end:.6f},"
             f"setpts=PTS-STARTPTS,"
-            f"scale={target_width}:{target_height}:force_original_aspect_ratio=decrease,"
-            f"pad={target_width}:{target_height}:(ow-iw)/2:(oh-ih)/2,"
+            f"{_orientation_chain(seg.source_video_path)},"
             f"{_themed_chain(seg_theme)},"
             f"fps={target_fps},"
             f"setsar=1"
@@ -404,6 +429,9 @@ def build_ffmpeg_command(
     audio_source_path: Optional[str] = None,
     audio_source_offset: float = 0.0,
     audio_source_duration: Optional[float] = None,
+    orientation_mode: str = "native",
+    orientation_crop_depth: int = 100,
+    source_dimensions: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> List[str]:
     """
     Construct the full FFmpeg subprocess command list for a multicam render.
@@ -463,6 +491,9 @@ def build_ffmpeg_command(
         audio_source_input_index=audio_source_input_index,
         audio_source_offset=audio_source_offset,
         audio_source_duration=audio_source_duration,
+        orientation_mode=orientation_mode,
+        orientation_crop_depth=orientation_crop_depth,
+        source_dimensions=source_dimensions,
     )
     filter_complex = ";".join(filter_lines)
 
@@ -514,6 +545,9 @@ def render(
     audio_source_path: Optional[str] = None,
     audio_source_offset: float = 0.0,
     audio_source_duration: Optional[float] = None,
+    orientation_mode: str = "native",
+    orientation_crop_depth: int = 100,
+    source_dimensions: Optional[Dict[str, Tuple[int, int]]] = None,
 ) -> str:
     """
     Render a multicam cut list to a single MP4 file.
@@ -575,6 +609,9 @@ def render(
         audio_source_path=audio_source_path,
         audio_source_offset=audio_source_offset,
         audio_source_duration=audio_source_duration,
+        orientation_mode=orientation_mode,
+        orientation_crop_depth=orientation_crop_depth,
+        source_dimensions=source_dimensions,
     )
 
     print(f"[rendering] Starting render → {output_path}")

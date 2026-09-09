@@ -25,7 +25,7 @@ from multicam_pipeline.auth import require_auth
 from multicam_pipeline.auth import principal_id_from_claims
 from pydantic import BaseModel, Field
 
-from multicam_pipeline.job_schema import MulticamJob, CuttingStrategy, EventType, EffectIntensity
+from multicam_pipeline.job_schema import MulticamJob, CuttingStrategy, EventType, EffectIntensity, OrientationMode
 from multicam_pipeline.billing_store import has_paid_tier_access
 from multicam_pipeline.config import (
     IS_LOCAL, IS_AWS,
@@ -69,6 +69,8 @@ class RenderRequest(BaseModel):
     event_type:              str   = Field(default="cheer", pattern="^(cheer|sport|concert|dance|wedding|spoken_word)$")
     effect_intensity:        str   = Field(default="balanced", pattern="^(subtle|balanced|cinematic)$")
     transition_style:        str   = Field(default="cut", pattern="^(auto|cut|dissolve|flash|slide|stylized)$")
+    orientation_mode:        str   = Field(default="auto", pattern="^(auto|landscape|portrait|native)$")
+    orientation_crop_depth:  int   = Field(default=100, ge=0, le=100)
     rekognition_sample_rate: int   = Field(default=15, ge=1, le=60)
     audio_source_file:       Optional[str] = None
     project_id:              Optional[str] = None
@@ -223,6 +225,15 @@ async def submit_render(req: RenderRequest, _claims: dict = Depends(require_auth
                 status_code=400,
                 detail="Render files must come from uploads registered to the selected project.",
             )
+        creator_video_paths = [
+            file_ref
+            for upload in (project.get("uploads") or [])
+            if upload.get("user_id") == project.get("owner_id")
+            for file_ref in (upload.get("files") or [])
+            if file_ref in req.files
+        ]
+    else:
+        creator_video_paths = []
 
     # Build output path based on environment
     if IS_LOCAL:
@@ -243,6 +254,9 @@ async def submit_render(req: RenderRequest, _claims: dict = Depends(require_auth
         event_type               = EventType(req.event_type),
         effect_intensity         = EffectIntensity(req.effect_intensity),
         transition_style         = req.transition_style,
+        orientation_mode         = OrientationMode(req.orientation_mode),
+        orientation_crop_depth   = req.orientation_crop_depth,
+        creator_video_paths      = creator_video_paths,
         rekognition_sample_rate  = req.rekognition_sample_rate,
         audio_source_override    = req.audio_source_file,
         project_id               = req.project_id,

@@ -252,13 +252,16 @@ def _create_match_token(project_id: str, requester_id: str) -> str:
         "expires_at": int(time.time()) + 15 * 60,
     }, separators=(",", ":")).encode()
     signature = hmac.new(_discovery_secret(), payload, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(payload + b"." + signature).decode().rstrip("=")
+    encoded_payload = base64.urlsafe_b64encode(payload).decode().rstrip("=")
+    encoded_signature = base64.urlsafe_b64encode(signature).decode().rstrip("=")
+    return f"{encoded_payload}.{encoded_signature}"
 
 
 def _read_match_token(token: str, requester_id: str) -> str:
     try:
-        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
-        payload, signature = raw.rsplit(b".", 1)
+        encoded_payload, encoded_signature = token.split(".", 1)
+        payload = base64.urlsafe_b64decode(encoded_payload + "=" * (-len(encoded_payload) % 4))
+        signature = base64.urlsafe_b64decode(encoded_signature + "=" * (-len(encoded_signature) % 4))
         expected = hmac.new(_discovery_secret(), payload, hashlib.sha256).digest()
         if not hmac.compare_digest(signature, expected):
             raise ValueError("Invalid signature")

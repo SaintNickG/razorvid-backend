@@ -63,7 +63,12 @@ class ReferenceAttempt:
     avg_confidence: float
 
 
-def _extract_mono_audio(video_path: str, sr: int = TARGET_SR) -> np.ndarray:
+def _extract_mono_audio(
+    video_path: str,
+    sr: int = TARGET_SR,
+    start_seconds: float = 0.0,
+    duration_seconds: Optional[float] = None,
+) -> np.ndarray:
     """
     Extract mono audio from a video file using FFmpeg into a temporary WAV,
     then load it with librosa at the target sample rate.
@@ -84,7 +89,13 @@ def _extract_mono_audio(video_path: str, sr: int = TARGET_SR) -> np.ndarray:
     try:
         cmd = [
             "ffmpeg", "-y",
-            "-i", video_path,
+        ]
+        if start_seconds > 0:
+            cmd += ["-ss", f"{start_seconds:.6f}"]
+        cmd += ["-i", video_path]
+        if duration_seconds is not None:
+            cmd += ["-t", f"{duration_seconds:.6f}"]
+        cmd += [
             "-ac", "1",             # downmix to mono
             "-ar", str(sr),         # resample to target SR
             "-vn",                  # strip video stream
@@ -449,6 +460,7 @@ def _compute_offsets_for_reference(
     audio_tracks: List[np.ndarray],
     reference: AudioReferenceChoice,
     thresholds: MatchThresholds,
+    audio_start_offsets: Optional[Dict[str, float]] = None,
 ) -> ReferenceAttempt:
     """Compute offsets and reliability outcomes using one fixed reference track."""
     reference_audio = audio_tracks[reference.index]
@@ -465,11 +477,17 @@ def _compute_offsets_for_reference(
 
         print(f"[audio_sync] Aligning '{path}' against master reference...")
         result = _align_with_window_consensus(audio, reference_audio)
+        start_offsets = audio_start_offsets or {}
+        full_track_delay = (
+            result.delay_seconds
+            + start_offsets.get(path, 0.0)
+            - start_offsets.get(reference.path, 0.0)
+        )
         # GCC-PHAT reports a positive delay when the shared audio appears later
         # inside this source's own file. The timeline convention is the inverse:
         # CutSegment uses local_time = master_time - offset, so a source whose
         # content sits later in its file starts earlier on the master timeline.
-        timeline_offset = -result.delay_seconds
+        timeline_offset = -full_track_delay
         result.delay_seconds = timeline_offset
         offsets[path] = round(timeline_offset, 6)
         results[path] = result
@@ -516,12 +534,86 @@ def _compute_offsets_for_reference(
     )
 
 
+def _metadata_window_plan(
+    video_paths: List[str],
+    creation_times: Optional[Dict[str, float]],
+    durations: Optional[Dict[str, float]],
+) -> Optional[tuple[Dict[str, float], float]]:
+    """Return per-file seek positions and a shared window when metadata is safe."""
+    if not creation_times or not durations:
+        return None
+    if any(path not in creation_times or path not in durations for path in video_paths):
+        return None
+    timestamps = [float(creation_times[path]) for path in video_paths]
+    if any(not np.isfinite(value) or value <= 0 for value in timestamps):
+        return None
+    if max(timestamps) - min(timestamps) > 4 * 60 * 60:
+        return None
+    anchor = max(timestamps)
+    starts = {path: max(0.0, anchor - float(creation_times[path])) for path in video_paths}
+    shared_duration = min(float(durations[path]) - starts[path] for path in video_paths)
+    if shared_duration < 20.0:
+        return None
+    return starts, min(45.0, shared_duration)
+
+
+def _evaluate_reference_attempts(
+    video_paths: List[str],
+    audio_tracks: List[np.ndarray],
+    thresholds: MatchThresholds,
+    preferred_reference_path: Optional[str],
+    audio_start_offsets: Optional[Dict[str, float]] = None,
+) -> ReferenceAttempt:
+    if preferred_reference_path and preferred_reference_path in video_paths:
+        reference = AudioReferenceChoice(
+            path=preferred_reference_path,
+            index=video_paths.index(preferred_reference_path),
+            score=1.0,
+        )
+        print(f"[audio_sync] Using user-selected master reference: '{reference.path}'")
+        candidate_refs = [reference]
+    else:
+        reference = _select_audio_reference(video_paths, audio_tracks)
+        ranked = _rank_audio_references(video_paths, audio_tracks)
+        candidate_refs = [reference] + [item for item in ranked if item.path != reference.path]
+
+    best_attempt: Optional[ReferenceAttempt] = None
+    for attempt_idx, candidate in enumerate(candidate_refs):
+        if attempt_idx > 0:
+            print(
+                f"[audio_sync] Retrying alignment with alternate reference: '{candidate.path}' "
+                f"(quality score={candidate.score:.3f})"
+            )
+        attempt = _compute_offsets_for_reference(
+            video_paths=video_paths,
+            audio_tracks=audio_tracks,
+            reference=candidate,
+            thresholds=thresholds,
+            audio_start_offsets=audio_start_offsets,
+        )
+        if best_attempt is None or (
+            len(attempt.weak_matches) < len(best_attempt.weak_matches)
+            or (
+                len(attempt.weak_matches) == len(best_attempt.weak_matches)
+                and attempt.avg_confidence > best_attempt.avg_confidence
+            )
+        ):
+            best_attempt = attempt
+        if not attempt.weak_matches:
+            return attempt
+    if best_attempt is None:
+        raise RuntimeError("Audio alignment failed before producing any candidate result.")
+    return best_attempt
+
+
 def align_videos_with_reference(
     video_paths: List[str],
     preferred_reference_path: Optional[str] = None,
     event_type: Optional[str] = None,
     cutting_strategy: Optional[str] = None,
     include_diagnostics: bool = False,
+    metadata_creation_times: Optional[Dict[str, float]] = None,
+    video_durations: Optional[Dict[str, float]] = None,
 ) -> Tuple[Dict[str, float], str] | Tuple[Dict[str, float], str, Dict[str, dict]]:
     """
     Compute audio alignment offsets and return the selected master reference path.
@@ -544,62 +636,36 @@ def align_videos_with_reference(
         f"peak_ratio_if_partial_support>={thresholds.min_peak_ratio_with_partial_support:.2f}"
     )
 
-    # Extract and analyze full audio tracks for each input video.
-    audio_tracks: List[np.ndarray] = [
-        _extract_mono_audio(path) for path in video_paths
-    ]
-
-    for path, audio in zip(video_paths, audio_tracks):
-        print(f"[audio_sync]   full-track analyzed: '{path}' ({len(audio) / TARGET_SR:.2f}s)")
-
-    if preferred_reference_path and preferred_reference_path in video_paths:
-        preferred_index = video_paths.index(preferred_reference_path)
-        reference = AudioReferenceChoice(
-            path=preferred_reference_path,
-            index=preferred_index,
-            score=1.0,
+    metadata_assisted = False
+    window_plan = _metadata_window_plan(video_paths, metadata_creation_times, video_durations)
+    if window_plan:
+        starts, window_duration = window_plan
+        print(f"[audio_sync] Metadata assist: analyzing a shared {window_duration:.1f}s audio window")
+        window_tracks = [
+            _extract_mono_audio(path, start_seconds=starts[path], duration_seconds=window_duration)
+            for path in video_paths
+        ]
+        best_attempt = _evaluate_reference_attempts(
+            video_paths,
+            window_tracks,
+            thresholds,
+            preferred_reference_path,
+            audio_start_offsets=starts,
         )
-        print(f"[audio_sync] Using user-selected master reference: '{reference.path}'")
-        candidate_refs = [reference]
-    else:
-        reference = _select_audio_reference(video_paths, audio_tracks)
-        ranked = _rank_audio_references(video_paths, audio_tracks)
-        candidate_refs = [reference] + [r for r in ranked if r.path != reference.path]
+        metadata_assisted = not best_attempt.weak_matches
+        if best_attempt.weak_matches:
+            print("[audio_sync] Metadata-assisted window was inconclusive; falling back to full-track alignment")
 
-    best_attempt: Optional[ReferenceAttempt] = None
-    for attempt_idx, candidate in enumerate(candidate_refs):
-        if attempt_idx > 0:
-            print(
-                f"[audio_sync] Retrying alignment with alternate reference: '{candidate.path}' "
-                f"(quality score={candidate.score:.3f})"
-            )
-
-        attempt = _compute_offsets_for_reference(
-            video_paths=video_paths,
-            audio_tracks=audio_tracks,
-            reference=candidate,
-            thresholds=thresholds,
+    if not metadata_assisted:
+        audio_tracks = [_extract_mono_audio(path) for path in video_paths]
+        for path, audio in zip(video_paths, audio_tracks):
+            print(f"[audio_sync]   full-track analyzed: '{path}' ({len(audio) / TARGET_SR:.2f}s)")
+        best_attempt = _evaluate_reference_attempts(
+            video_paths,
+            audio_tracks,
+            thresholds,
+            preferred_reference_path,
         )
-
-        if best_attempt is None:
-            best_attempt = attempt
-        else:
-            better = (
-                len(attempt.weak_matches) < len(best_attempt.weak_matches)
-                or (
-                    len(attempt.weak_matches) == len(best_attempt.weak_matches)
-                    and attempt.avg_confidence > best_attempt.avg_confidence
-                )
-            )
-            if better:
-                best_attempt = attempt
-
-        if not attempt.weak_matches:
-            best_attempt = attempt
-            break
-
-    if best_attempt is None:
-        raise RuntimeError("Audio alignment failed before producing any candidate result.")
 
     offsets = best_attempt.offsets
     weak_matches = best_attempt.weak_matches
@@ -635,6 +701,7 @@ def align_videos_with_reference(
                 "agreement_std_seconds": round(result.agreement_std_seconds, 4),
                 "agreement_support": round(result.agreement_support, 3),
                 "modality_support": result.modality_support,
+                "metadata_assisted": metadata_assisted,
             }
             for path, result in best_attempt.results.items()
         }

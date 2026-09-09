@@ -28,6 +28,14 @@ def _resolve_durations(metadata: List[VideoMetadata]) -> Dict[str, float]:
     return {m.path: float(m.duration) for m in metadata}
 
 
+def _resolve_output_orientation(metadata: List[VideoMetadata], job: MulticamJob) -> str:
+    if job.orientation_mode.value != "auto":
+        return job.orientation_mode.value
+    portrait_paths = {item.path for item in metadata if item.height > item.width}
+    creator_is_portrait = any(path in portrait_paths for path in job.creator_video_paths)
+    return "portrait" if creator_is_portrait and len(portrait_paths) * 2 >= len(metadata) else "landscape"
+
+
 def _build_segments(
     video_paths: List[str],
     offsets: Dict[str, float],
@@ -71,6 +79,13 @@ def run_multicam_job(job: MulticamJob) -> str:
     metadata = validate_and_ingest(job.video_paths)
     durations = _resolve_durations(metadata)
 
+    selected_orientation = _resolve_output_orientation(metadata, job)
+    output_width, output_height = job.target_width, job.target_height
+    if selected_orientation == "portrait" and output_width > output_height:
+        output_width, output_height = output_height, output_width
+    elif selected_orientation == "landscape" and output_height > output_width:
+        output_width, output_height = output_height, output_width
+
     # 2) Audio-based alignment to compute per-angle master timeline offsets.
     offsets, reference_audio_path, sync_diagnostics = align_videos_with_reference(
         job.video_paths,
@@ -78,6 +93,8 @@ def run_multicam_job(job: MulticamJob) -> str:
         event_type=job.event_type.value,
         cutting_strategy=job.cutting_strategy.value,
         include_diagnostics=True,
+        metadata_creation_times={item.path: item.creation_time for item in metadata if item.creation_time is not None},
+        video_durations=durations,
     )
     job.sync_diagnostics = sync_diagnostics
 
@@ -98,8 +115,8 @@ def run_multicam_job(job: MulticamJob) -> str:
     output_path = render(
         segments=segments,
         output_path=job.output_path,
-        target_width=job.target_width,
-        target_height=job.target_height,
+        target_width=output_width,
+        target_height=output_height,
         target_fps=job.target_fps,
         event_profile=job.event_type.value,
         effect_intensity=job.effect_intensity.value,
@@ -107,6 +124,9 @@ def run_multicam_job(job: MulticamJob) -> str:
         audio_source_path=reference_audio_path,
         audio_source_offset=offsets.get(reference_audio_path, 0.0),
         audio_source_duration=durations.get(reference_audio_path),
+        orientation_mode=selected_orientation,
+        orientation_crop_depth=job.orientation_crop_depth,
+        source_dimensions={item.path: (item.width, item.height) for item in metadata},
     )
 
     if job.project_id:
