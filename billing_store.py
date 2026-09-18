@@ -253,6 +253,94 @@ def has_paid_tier_access(user_id: Optional[str]) -> bool:
     return bool((billing.get("entitlements") or {}).get("paid_tier", False))
 
 
+def get_user_monthly_render_count(user_id: str, month_key: Optional[str] = None) -> int:
+    """Return the number of renders submitted by the user in the given UTC calendar month (YYYY-MM)."""
+    if not user_id:
+        return 0
+    if not month_key:
+        month_key = datetime.now(timezone.utc).strftime("%Y-%m")
+
+    if _use_dynamodb():
+        table = _ddb_table()
+        response = table.get_item(Key={"pk": f"USER#{user_id}", "sk": f"USAGE#{month_key}"})
+        item = response.get("Item")
+        return int(item.get("render_count", 0)) if item else 0
+
+    store = _load_store()
+    usage = store.setdefault("monthly_renders", {})
+    user_usage = usage.setdefault(user_id, {})
+    return int(user_usage.get(month_key, 0))
+
+
+def increment_user_monthly_render_count(user_id: str, month_key: Optional[str] = None) -> int:
+    """Increment and return the updated render count for the current month."""
+    if not user_id:
+        return 0
+    if not month_key:
+        month_key = datetime.now(timezone.utc).strftime("%Y-%m")
+
+    if _use_dynamodb():
+        table = _ddb_table()
+        response = table.update_item(
+            Key={"pk": f"USER#{user_id}", "sk": f"USAGE#{month_key}"},
+            UpdateExpression="SET render_count = if_not_exists(render_count, :zero) + :inc, updated_at = :now, item_type = :type",
+            ExpressionAttributeValues={
+                ":zero": 0,
+                ":inc": 1,
+                ":now": _now(),
+                ":type": "monthly_usage",
+            },
+            ReturnValues="UPDATED_NEW",
+        )
+        return int(response.get("Attributes", {}).get("render_count", 1))
+
+    store = _load_store()
+    usage = store.setdefault("monthly_renders", {})
+    user_usage = usage.setdefault(user_id, {})
+    current_count = int(user_usage.get(month_key, 0)) + 1
+    user_usage[month_key] = current_count
+    _save_store(store)
+    return current_count
+
+
+def get_user_billing_quota(user_id: str) -> Dict[str, Any]:
+    """
+    Return comprehensive quota and plan entitlements for the user.
+    Free tier: 2 renders/month limit.
+    Paid tier (Pro): unlimited non-Rekognition renders.
+    """
+    if not user_id:
+        return {
+            "user_id": "",
+            "plan": "free",
+            "is_paid_tier": False,
+            "month_key": datetime.now(timezone.utc).strftime("%Y-%m"),
+            "monthly_limit": 2,
+            "renders_used": 0,
+            "renders_remaining": 2,
+            "can_render": True,
+        }
+
+    billing = get_user_billing(user_id)
+    is_paid = bool((billing.get("entitlements") or {}).get("paid_tier", False))
+    month_key = datetime.now(timezone.utc).strftime("%Y-%m")
+    used = get_user_monthly_render_count(user_id, month_key)
+    limit = None if is_paid else 2
+    remaining = None if is_paid else max(0, 2 - used)
+    can_render = is_paid or (used < 2)
+
+    return {
+        "user_id": user_id,
+        "plan": "pro" if is_paid else billing.get("plan", "free"),
+        "is_paid_tier": is_paid,
+        "month_key": month_key,
+        "monthly_limit": limit,
+        "renders_used": used,
+        "renders_remaining": remaining,
+        "can_render": can_render,
+    }
+
+
 def billing_backend_health() -> Dict[str, Any]:
     """
     Check billing backend availability and return backend-specific diagnostics.

@@ -18,6 +18,7 @@ from multicam_pipeline.billing_store import (
     append_billing_event,
     find_user_by_customer_id,
     get_user_billing,
+    get_user_billing_quota,
     set_user_billing,
 )
 
@@ -67,9 +68,21 @@ class CreateCheckoutSessionRequest(BaseModel):
 
 @router.get("/me")
 async def get_my_billing(claims: dict = Depends(require_auth)):
-    """Return billing state for the authenticated user."""
+    """Return billing state and current render quota for the authenticated user."""
     user_id = resolve_actor_id(claims)
-    return get_user_billing(user_id)
+    billing = get_user_billing(user_id)
+    quota = get_user_billing_quota(user_id)
+    return {
+        **billing,
+        "quota": quota,
+    }
+
+
+@router.get("/quota")
+async def get_my_quota(claims: dict = Depends(require_auth)):
+    """Return render usage and remaining monthly quota for the authenticated user."""
+    user_id = resolve_actor_id(claims)
+    return get_user_billing_quota(user_id)
 
 
 @router.post("/checkout-session")

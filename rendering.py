@@ -276,6 +276,24 @@ def _build_filtergraph(
     filter_lines: List[str] = []
     n = len(segments)
 
+    # Different cameras/mics record at wildly different volume levels. Loudness
+    # is normalized once per unique audio source (not per cut segment) — a
+    # single continuous loudnorm pass measures integrated loudness reliably,
+    # whereas normalizing each short trimmed cut independently can pump/duck
+    # audibly between angles. The normalized alias is then trimmed per segment.
+    normalized_audio_aliases: Dict[int, str] = {}
+
+    def _normalized_audio_alias(input_index: int) -> str:
+        if input_index not in normalized_audio_aliases:
+            alias = f"anorm{input_index}"
+            filter_lines.append(
+                f"[{input_index}:a]"
+                f"loudnorm=I=-16:TP=-1.5:LRA=11,"
+                f"aformat=sample_rates=44100:channel_layouts=stereo[{alias}]"
+            )
+            normalized_audio_aliases[input_index] = alias
+        return normalized_audio_aliases[input_index]
+
     def _orientation_chain(source_path: str) -> str:
         dimensions = (source_dimensions or {}).get(source_path)
         if not dimensions:
@@ -344,11 +362,11 @@ def _build_filtergraph(
         # master-timeline window for this segment) or fall back to the
         # segment's own source input when no reference is set.
         if audio_source_input_index is None:
+            own_alias = _normalized_audio_alias(src_idx)
             filter_lines.append(
-                f"[{src_idx}:a]"
+                f"[{own_alias}]"
                 f"atrim=start={seg.source_start:.6f}:end={seg.source_end:.6f},"
-                f"asetpts=PTS-STARTPTS,"
-                f"aformat=sample_rates=44100:channel_layouts=stereo[a{i}]"
+                f"asetpts=PTS-STARTPTS[a{i}]"
             )
             continue
 
@@ -379,11 +397,11 @@ def _build_filtergraph(
 
         if body_duration > 0.0005:
             body_label = f"a{i}_body"
+            ref_alias = _normalized_audio_alias(audio_source_input_index)
             filter_lines.append(
-                f"[{audio_source_input_index}:a]"
+                f"[{ref_alias}]"
                 f"atrim=start={overlap_start:.6f}:end={overlap_end:.6f},"
-                f"asetpts=PTS-STARTPTS,"
-                f"aformat=sample_rates=44100:channel_layouts=stereo"
+                f"asetpts=PTS-STARTPTS"
                 f"[{body_label}]"
             )
             parts.append(f"[{body_label}]")

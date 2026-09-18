@@ -61,6 +61,12 @@ def _authorize_download(job_id: str, claims: dict) -> tuple[str, str]:
         if item and item.get("output_path"):
             bucket, key = _parse_s3_uri(item["output_path"])
 
+        if item and item.get("output_purged"):
+            raise HTTPException(
+                status_code=410,
+                detail="This render has passed its 24-hour retention window and is no longer available for download.",
+            )
+
         actor_id = principal_id_from_claims(claims)
         project_id = item.get("project_id") if item else None
         if actor_id and project_id:

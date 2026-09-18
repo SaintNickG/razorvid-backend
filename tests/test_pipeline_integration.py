@@ -73,6 +73,36 @@ def test_ingestion_rejects_thumbnail_track_only_file(monkeypatch: pytest.MonkeyP
         validate_and_ingest(["IMG_7506.mov"])
 
 
+def test_ingestion_excludes_low_res_companion_when_enough_angles_remain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A low-resolution companion file should be dropped, not fail the render, when 2+ good angles remain."""
+    from multicam_pipeline.ingestion import validate_and_ingest
+
+    good_probe = {
+        "streams": [
+            {"codec_type": "audio", "channels": 2},
+            {"codec_type": "video", "width": 1920, "height": 1080, "r_frame_rate": "30/1"},
+        ],
+        "format": {"duration": "60.0"},
+    }
+    companion_probe = {
+        "streams": [
+            {"codec_type": "audio", "channels": 2},
+            {"codec_type": "video", "width": 480, "height": 360, "r_frame_rate": "30/1"},
+        ],
+        "format": {"duration": "60.0"},
+    }
+
+    def fake_ffprobe(path: str) -> dict:
+        return companion_probe if "companion" in path else good_probe
+
+    monkeypatch.setattr("multicam_pipeline.ingestion._run_ffprobe", fake_ffprobe)
+    monkeypatch.setattr("os.path.isfile", lambda _: True)
+
+    results = validate_and_ingest(["cam1.mov", "cam2.mov", "companion.mov"])
+
+    assert {m.path for m in results} == {"cam1.mov", "cam2.mov"}
+
+
 def test_ffmpeg_command_caps_threads_for_long_renders() -> None:
     from multicam_pipeline.rendering import build_ffmpeg_command
 
@@ -127,6 +157,54 @@ def test_ffmpeg_command_opens_each_source_once() -> None:
     assert video_trims == 60, f"Expected 60 video trims, got {video_trims}"
     assert filter_complex.count("atrim=start=") == 60  # audio trims
     assert filter_complex.count("setpts=PTS-STARTPTS") >= 60
+
+
+def test_render_normalizes_loudness_once_per_source_not_per_segment() -> None:
+    """
+    Loudness normalization must run once per unique audio source, not once per
+    cut segment — normalizing every short trimmed clip independently would
+    pump/duck audibly between cuts instead of leveling mic gain differences
+    across cameras.
+    """
+    from multicam_pipeline.rendering import build_ffmpeg_command
+
+    segments = [
+        CutSegment(float(i) * 2.0, float(i) * 2.0 + 2.0, f"cam{i % 3}.mp4", 0.0)
+        for i in range(30)
+    ]
+    command = build_ffmpeg_command(
+        segments,
+        "output.mp4",
+        "libx264",
+        audio_source_path="cam0.mp4",
+    )
+    filter_complex = command[command.index("-filter_complex") + 1]
+
+    # All 30 segments pull from the single shared audio reference, so loudnorm
+    # must appear exactly once — not once per segment.
+    assert filter_complex.count("loudnorm=") == 1
+
+
+def test_audio_reference_quality_score_ignores_render_time_normalization() -> None:
+    """
+    The master-audio-reference picker must judge raw signal quality (duration,
+    activity, dynamic range, clipping) directly from decoded samples — it must
+    never depend on or be affected by the render-time loudnorm filter, which
+    only runs later inside the FFmpeg output stage.
+    """
+    from multicam_pipeline.audio_sync import _audio_quality_score
+
+    rng = np.random.default_rng(0)
+    quiet_clip = (rng.standard_normal(22050 * 5).astype(np.float32)) * 0.01
+    strong_clip = np.clip(rng.standard_normal(22050 * 5).astype(np.float32) * 0.3, -0.95, 0.95)
+
+    quiet_score = _audio_quality_score(quiet_clip, max_length=len(strong_clip))
+    strong_score = _audio_quality_score(strong_clip, max_length=len(strong_clip))
+
+    # A clip with real signal activity/dynamic range must clearly outrank a
+    # near-silent one — proving the picker still sees each source's true,
+    # un-normalized loudness/activity profile.
+    assert strong_score > quiet_score
 
 
 def test_orientation_crop_depth_only_zooms_opposing_angles() -> None:

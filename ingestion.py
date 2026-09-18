@@ -172,6 +172,12 @@ def validate_and_ingest(video_paths: List[str]) -> List[VideoMetadata]:
         - Must contain an audio stream (required for sync)
         - Duration must be > 1 second
 
+    Files whose resolution is below the 480px short-side minimum are excluded
+    rather than failing the whole render — this is a common iPhone/Photos
+    quirk where a low-res "companion" or thumbnail file gets bundled alongside
+    the real camera angle. The render only fails outright if fewer than 2
+    usable angles remain after exclusion.
+
     Args:
         video_paths: List of paths to uploaded video files.
 
@@ -185,6 +191,7 @@ def validate_and_ingest(video_paths: List[str]) -> List[VideoMetadata]:
         raise ValueError("No video paths provided.")
 
     results: List[VideoMetadata] = []
+    low_res_skips: List[str] = []
 
     for path in video_paths:
         print(f"[ingestion] Ingesting '{path}'...")
@@ -199,16 +206,28 @@ def validate_and_ingest(video_paths: List[str]) -> List[VideoMetadata]:
         if meta.fps <= 0:
             raise ValueError(f"'{path}' has invalid FPS: {meta.fps}")
         if min(meta.width, meta.height) < 480:
-            raise ValueError(
+            reason = (
                 f"'{path}' video resolution {meta.resolution} is too low. "
                 f"Minimum short-side is 480px. This file may be an audio-only "
                 f"companion or a thumbnail track rather than a camera angle."
             )
+            low_res_skips.append(reason)
+            print(f"[ingestion]   ✗ excluding low-resolution companion file: {reason}")
+            continue
 
         print(
             f"[ingestion]   ✓ {meta.resolution} @ {meta.fps}fps | "
             f"{meta.duration:.2f}s | {meta.audio_channels}ch audio"
         )
         results.append(meta)
+
+    if len(results) < 2 and low_res_skips:
+        # Not enough real camera angles remain once companion files are excluded —
+        # surface the original per-file reason so callers get the specific detail.
+        raise ValueError(low_res_skips[0])
+    if not results:
+        raise ValueError("No usable video files after validation.")
+
+    return results
 
     return results

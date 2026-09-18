@@ -26,7 +26,11 @@ from multicam_pipeline.auth import principal_id_from_claims
 from pydantic import BaseModel, Field
 
 from multicam_pipeline.job_schema import MulticamJob, CuttingStrategy, EventType, EffectIntensity, OrientationMode
-from multicam_pipeline.billing_store import has_paid_tier_access
+from multicam_pipeline.billing_store import (
+    get_user_billing_quota,
+    has_paid_tier_access,
+    increment_user_monthly_render_count,
+)
 from multicam_pipeline.config import (
     IS_LOCAL, IS_AWS,
     AWS_REGION, SQS_QUEUE_URL, DYNAMODB_TABLE, LOCAL_OUTPUT_DIR,
@@ -74,6 +78,15 @@ class RenderRequest(BaseModel):
     rekognition_sample_rate: int   = Field(default=15, ge=1, le=60)
     audio_source_file:       Optional[str] = None
     project_id:              Optional[str] = None
+    max_duration:            Optional[float] = None
+    max_video_duration_seconds: Optional[float] = None
+    auto_split:              Optional[bool] = None
+    part_index:              Optional[int] = None
+    total_parts:             Optional[int] = None
+    # Set when the creator chose to include a file with missing/out-of-window
+    # recording metadata anyway — skips the metadata-window shortcut and
+    # forces full-track audio matching instead of trusting the metadata.
+    force_full_track_sync:   Optional[bool] = None
 
 
 class CostEstimateRequest(BaseModel):
@@ -93,6 +106,9 @@ class JobStatusResponse(BaseModel):
     error:       Optional[str] = None
     created_at:  str
     updated_at:  str
+    expires_at:  Optional[str] = None
+    output_purged: bool = False
+    excluded_low_quality_files: List[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -198,12 +214,26 @@ async def submit_render(req: RenderRequest, _claims: dict = Depends(require_auth
 
     actor_id = principal_id_from_claims(_claims)
 
-    if req.cutting_strategy == "rekognition":
-        if not actor_id or not has_paid_tier_access(actor_id):
-            raise HTTPException(
-                status_code=402,
-                detail="Paid tier required for rekognition strategy. Complete billing checkout first.",
-            )
+    if actor_id:
+        quota = get_user_billing_quota(actor_id)
+        if req.cutting_strategy == "rekognition":
+            if not quota.get("is_paid_tier"):
+                raise HTTPException(
+                    status_code=402,
+                    detail="Paid tier required for rekognition strategy. Complete billing checkout first.",
+                )
+        else:
+            # Local or interval cutting: 2 renders/month on free tier, unlimited on paid tier
+            if not quota.get("is_paid_tier") and not quota.get("can_render"):
+                raise HTTPException(
+                    status_code=402,
+                    detail="Monthly free limit reached (2/2 renders used this month). Upgrade to Pro for unlimited renders.",
+                )
+    elif req.cutting_strategy == "rekognition":
+        raise HTTPException(
+            status_code=402,
+            detail="Paid tier required for rekognition strategy. Complete billing checkout first.",
+        )
 
     if req.project_id:
         project = get_project_record(req.project_id)
@@ -260,11 +290,18 @@ async def submit_render(req: RenderRequest, _claims: dict = Depends(require_auth
         rekognition_sample_rate  = req.rekognition_sample_rate,
         audio_source_override    = req.audio_source_file,
         project_id               = req.project_id,
+        max_duration             = req.max_duration or req.max_video_duration_seconds or 240.0,
+        auto_split               = req.auto_split if req.auto_split is not None else True,
+        part_index               = req.part_index,
+        total_parts              = req.total_parts,
+        force_full_track_sync    = bool(req.force_full_track_sync),
     )
 
     if req.project_id:
         register_project_job(req.project_id, job.job_id)
 
+    if actor_id:
+        increment_user_monthly_render_count(actor_id)
 
     if IS_LOCAL:
         await _submit_local(job)
@@ -283,6 +320,9 @@ async def submit_render(req: RenderRequest, _claims: dict = Depends(require_auth
         error       = None,
         created_at  = job.created_at,
         updated_at  = job.updated_at,
+        expires_at  = job.expires_at,
+        output_purged = job.output_purged,
+        excluded_low_quality_files = job.excluded_low_quality_files,
     )
 
 
@@ -320,6 +360,9 @@ async def get_status(job_id: str, _claims: dict = Depends(require_auth)):
         error       = data.get("error"),
         created_at  = data["created_at"],
         updated_at  = data["updated_at"],
+        expires_at  = data.get("expires_at"),
+        output_purged = bool(data.get("output_purged", False)),
+        excluded_low_quality_files = list(data.get("excluded_low_quality_files") or []),
     )
 
 

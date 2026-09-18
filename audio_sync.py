@@ -614,12 +614,21 @@ def align_videos_with_reference(
     include_diagnostics: bool = False,
     metadata_creation_times: Optional[Dict[str, float]] = None,
     video_durations: Optional[Dict[str, float]] = None,
+    force_full_track_sync: bool = False,
 ) -> Tuple[Dict[str, float], str] | Tuple[Dict[str, float], str, Dict[str, dict]]:
     """
     Compute audio alignment offsets and return the selected master reference path.
 
     The master reference is chosen automatically from the input angles based on
     a quality heuristic that favors complete, active, and stable audio tracks.
+
+    Args:
+        force_full_track_sync: When True, skip the metadata-window shortcut
+            entirely and go straight to full-track audio matching. Set this
+            when a creator explicitly included a file with missing or
+            out-of-window recording metadata — the metadata can't be trusted
+            to pick a reliable analysis window, so use the more thorough
+            (but slower) full-clip comparison instead.
     """
     if len(video_paths) < 2:
         raise ValueError("At least 2 video paths are required for alignment.")
@@ -637,7 +646,9 @@ def align_videos_with_reference(
     )
 
     metadata_assisted = False
-    window_plan = _metadata_window_plan(video_paths, metadata_creation_times, video_durations)
+    window_plan = None if force_full_track_sync else _metadata_window_plan(video_paths, metadata_creation_times, video_durations)
+    if force_full_track_sync:
+        print("[audio_sync] Creator confirmed uncertain recording metadata — skipping metadata window, using full-track alignment")
     if window_plan:
         starts, window_duration = window_plan
         print(f"[audio_sync] Metadata assist: analyzing a shared {window_duration:.1f}s audio window")

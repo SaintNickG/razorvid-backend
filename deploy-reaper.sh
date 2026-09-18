@@ -26,6 +26,7 @@ WORKER_FUNCTION_NAME="${WORKER_FUNCTION_NAME:-RazorVidRenderWorker}"
 REAPER_ROLE_NAME="${REAPER_ROLE_NAME:-RazorVidStuckJobReaperRole}"
 DYNAMODB_TABLE="${DYNAMODB_TABLE:-multicam-jobs}"
 STUCK_THRESHOLD_MINUTES="${STUCK_THRESHOLD_MINUTES:-20}"
+S3_OUTPUT_BUCKET="${S3_OUTPUT_BUCKET:-multicam-output}"
 
 # Optional: set ALERT_EMAIL to create an SNS subscription for OOM alerts.
 ALERT_EMAIL="${ALERT_EMAIL:-}"
@@ -69,10 +70,15 @@ jq -n \
   --arg region "$AWS_REGION" \
   --arg account "$AWS_ACCOUNT_ID" \
   --arg table "$DYNAMODB_TABLE" \
+  --arg bucket "$S3_OUTPUT_BUCKET" \
   '{Version:"2012-10-17",Statement:[{
     Effect:"Allow",
     Action:["dynamodb:Scan","dynamodb:UpdateItem"],
     Resource:("arn:aws:dynamodb:" + $region + ":" + $account + ":table/" + $table)
+  },{
+    Effect:"Allow",
+    Action:["s3:DeleteObject"],
+    Resource:("arn:aws:s3:::" + $bucket + "/*")
   }]}' > "$ACCESS_POLICY"
 
 aws iam put-role-policy \
@@ -83,7 +89,7 @@ aws iam put-role-policy \
 # ---------------------------------------------------------------------------
 # Create or update the reaper Lambda function
 # ---------------------------------------------------------------------------
-ENVIRONMENT="Variables={ENV=aws,DYNAMODB_TABLE=${DYNAMODB_TABLE},STUCK_THRESHOLD_MINUTES=${STUCK_THRESHOLD_MINUTES}}"
+ENVIRONMENT="Variables={ENV=aws,DYNAMODB_TABLE=${DYNAMODB_TABLE},STUCK_THRESHOLD_MINUTES=${STUCK_THRESHOLD_MINUTES},S3_OUTPUT_BUCKET=${S3_OUTPUT_BUCKET}}"
 
 if aws lambda get-function --function-name "$REAPER_FUNCTION_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
   aws lambda update-function-code \

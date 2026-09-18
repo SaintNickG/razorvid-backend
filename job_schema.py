@@ -8,7 +8,7 @@ environments dispatch and track jobs identically.
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import List, Optional
 
@@ -91,6 +91,14 @@ class MulticamJob:
     selected_audio_source_path: Optional[str] = None
     sync_diagnostics:         Optional[dict]  = None
     project_id:               Optional[str]   = None
+    max_duration:             Optional[float] = 240.0
+    auto_split:               bool            = True
+    part_index:               Optional[int]   = None
+    total_parts:              Optional[int]   = None
+    force_full_track_sync:    bool            = False
+    # Basenames of input files silently dropped for being below the 480px
+    # minimum resolution (typically iPhone/Photos thumbnail or companion tracks).
+    excluded_low_quality_files: List[str]     = field(default_factory=list)
     job_id:                   str             = field(default_factory=lambda: str(uuid.uuid4()))
     status:                   JobStatus       = JobStatus.PENDING
     error:                    Optional[str]   = None
@@ -100,6 +108,9 @@ class MulticamJob:
     updated_at:               str             = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+    # Output retention: set on completion, output is purged after this time.
+    expires_at:               Optional[str]   = None
+    output_purged:            bool            = False
 
     def to_dict(self) -> dict:
         """Serialize the job to a plain dict (for SQS message body or DynamoDB item)."""
@@ -123,10 +134,18 @@ class MulticamJob:
             "selected_audio_source_path": self.selected_audio_source_path,
             "sync_diagnostics":         self.sync_diagnostics,
             "project_id":              self.project_id,
+            "max_duration":            self.max_duration,
+            "auto_split":              self.auto_split,
+            "part_index":              self.part_index,
+            "total_parts":             self.total_parts,
+            "force_full_track_sync":   self.force_full_track_sync,
+            "excluded_low_quality_files": self.excluded_low_quality_files,
             "status":                  self.status.value,
             "error":                   self.error,
             "created_at":              self.created_at,
             "updated_at":              self.updated_at,
+            "expires_at":              self.expires_at,
+            "output_purged":           self.output_purged,
         }
 
     @classmethod
@@ -152,19 +171,28 @@ class MulticamJob:
             selected_audio_source_path = data.get("selected_audio_source_path"),
             sync_diagnostics          = data.get("sync_diagnostics"),
             project_id               = data.get("project_id"),
+            max_duration             = float(data["max_duration"]) if data.get("max_duration") is not None else 240.0,
+            auto_split               = bool(data.get("auto_split", True)),
+            part_index               = int(data["part_index"]) if data.get("part_index") is not None else None,
+            total_parts              = int(data["total_parts"]) if data.get("total_parts") is not None else None,
+            force_full_track_sync    = bool(data.get("force_full_track_sync", False)),
+            excluded_low_quality_files = list(data.get("excluded_low_quality_files") or []),
             status                   = JobStatus(data.get("status", JobStatus.PENDING)),
             error                    = data.get("error"),
             created_at               = data.get("created_at", ""),
             updated_at               = data.get("updated_at", ""),
+            expires_at               = data.get("expires_at"),
+            output_purged            = bool(data.get("output_purged", False)),
         )
 
     def mark_processing(self) -> None:
         self.status     = JobStatus.PROCESSING
         self.updated_at = datetime.now(timezone.utc).isoformat()
 
-    def mark_complete(self) -> None:
+    def mark_complete(self, retention_hours: float = 24.0) -> None:
         self.status     = JobStatus.COMPLETE
         self.updated_at = datetime.now(timezone.utc).isoformat()
+        self.expires_at = (datetime.now(timezone.utc) + timedelta(hours=retention_hours)).isoformat()
 
     def mark_failed(self, error: str) -> None:
         self.status     = JobStatus.FAILED

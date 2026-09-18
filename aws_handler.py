@@ -157,7 +157,7 @@ def _upload_to_s3(local_path: str, output_s3_uri: str) -> str:
 # Core pipeline runner
 # ---------------------------------------------------------------------------
 
-def _run_pipeline(job: MulticamJob, local_video_paths: list, local_output_path: str) -> tuple[str, str]:
+def _run_pipeline(job: MulticamJob, local_video_paths: list, local_output_path: str) -> tuple[str, str, dict, list[str]]:
     """
     Execute the full multicam pipeline against locally downloaded files.
 
@@ -196,13 +196,19 @@ def _run_pipeline(job: MulticamJob, local_video_paths: list, local_output_path: 
         selected_audio_source_path=job.selected_audio_source_path,
         sync_diagnostics=job.sync_diagnostics,
         project_id=job.project_id,
+        force_full_track_sync=job.force_full_track_sync,
         status=job.status,
         error=job.error,
         created_at=job.created_at,
         updated_at=job.updated_at,
     )
     output_path = run_multicam_job(local_job)
-    return output_path, (local_job.selected_audio_source_path or ""), local_job.sync_diagnostics
+    return (
+        output_path,
+        (local_job.selected_audio_source_path or ""),
+        local_job.sync_diagnostics,
+        local_job.excluded_low_quality_files,
+    )
 
 
 def _map_local_source_to_original_uri(
@@ -283,12 +289,13 @@ def lambda_handler(event: dict, context: Any) -> dict:
                 local_output_path = os.path.join(tmp_dir, "output.mp4")
 
                 # Step 3: Run the full pipeline against local files
-                local_output_result, selected_audio_source_path, sync_diagnostics = _run_pipeline(
+                local_output_result, selected_audio_source_path, sync_diagnostics, excluded_low_quality_files = _run_pipeline(
                     job,
                     local_video_paths,
                     local_output_path,
                 )
                 job.sync_diagnostics = sync_diagnostics
+                job.excluded_low_quality_files = excluded_low_quality_files
                 job.selected_audio_source_path = _map_local_source_to_original_uri(
                     selected_audio_source_path,
                     local_video_paths,
@@ -311,12 +318,14 @@ def lambda_handler(event: dict, context: Any) -> dict:
                     send_render_complete(job.job_id, project.get("name", "your project"), project.get("owner_id", ""))
 
         except Exception as exc:
-            error_detail = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
-            print(f"[aws_handler] Job failed (SQS message {message_id}):\n{error_detail}")
+            # job.error is user-facing (translated to plain language on the
+            # frontend) — keep the traceback in CloudWatch logs only.
+            user_message = f"{type(exc).__name__}: {exc}"
+            print(f"[aws_handler] Job failed (SQS message {message_id}):\n{user_message}\n{traceback.format_exc()}")
 
             # Update DynamoDB with failure details if we have a job object
             if job:
-                job.mark_failed(error_detail)
+                job.mark_failed(user_message)
                 _upsert_job_status(job)
 
                 # --- Notify project owner of failure ---

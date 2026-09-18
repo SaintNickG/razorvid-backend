@@ -14,6 +14,7 @@ and AWS Lambda jobs execute identical business logic:
 
 from __future__ import annotations
 
+import os
 from typing import Dict, List
 
 from multicam_pipeline.audio_sync import align_videos_with_reference
@@ -75,8 +76,15 @@ def run_multicam_job(job: MulticamJob) -> str:
     Returns:
         Rendered output path.
     """
-    # 1) Input validation + metadata extraction.
+    # 1) Input validation + metadata extraction. Files with unusable resolution
+    # (e.g. an iPhone thumbnail/companion track) are dropped by validate_and_ingest;
+    # everything downstream must use the surviving paths, not job.video_paths.
     metadata = validate_and_ingest(job.video_paths)
+    valid_video_paths = [item.path for item in metadata]
+    excluded_paths = [p for p in job.video_paths if p not in valid_video_paths]
+    if excluded_paths:
+        job.excluded_low_quality_files = [os.path.basename(p) for p in excluded_paths]
+        print(f"[pipeline] Excluded {len(excluded_paths)} low-resolution companion file(s): {job.excluded_low_quality_files}")
     durations = _resolve_durations(metadata)
 
     selected_orientation = _resolve_output_orientation(metadata, job)
@@ -88,13 +96,14 @@ def run_multicam_job(job: MulticamJob) -> str:
 
     # 2) Audio-based alignment to compute per-angle master timeline offsets.
     offsets, reference_audio_path, sync_diagnostics = align_videos_with_reference(
-        job.video_paths,
+        valid_video_paths,
         preferred_reference_path=job.audio_source_override,
         event_type=job.event_type.value,
         cutting_strategy=job.cutting_strategy.value,
         include_diagnostics=True,
         metadata_creation_times={item.path: item.creation_time for item in metadata if item.creation_time is not None},
         video_durations=durations,
+        force_full_track_sync=job.force_full_track_sync,
     )
     job.sync_diagnostics = sync_diagnostics
 
@@ -105,7 +114,7 @@ def run_multicam_job(job: MulticamJob) -> str:
 
     # 3) Build the multicam cut timeline based on job strategy.
     segments = _build_segments(
-        video_paths=job.video_paths,
+        video_paths=valid_video_paths,
         offsets=offsets,
         job=job,
         durations=durations,

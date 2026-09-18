@@ -26,8 +26,10 @@ Dependencies:
 """
 
 import asyncio
+import os
 import traceback
 from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from multicam_pipeline.job_schema import MulticamJob, JobStatus
@@ -50,7 +52,7 @@ _executor = ProcessPoolExecutor(max_workers=4)
 # Core pipeline runner (runs in a subprocess worker)
 # ---------------------------------------------------------------------------
 
-def _run_pipeline_sync(job_dict: dict) -> tuple[str, str]:
+def _run_pipeline_sync(job_dict: dict) -> tuple[str, str, list[str]]:
     """
     Execute the full multicam pipeline synchronously.
 
@@ -68,7 +70,7 @@ def _run_pipeline_sync(job_dict: dict) -> tuple[str, str]:
         job_dict: Serialized MulticamJob dict from MulticamJob.to_dict().
 
     Returns:
-        The output file path string on success.
+        Tuple of (output_path, selected_audio_source_path, excluded_low_quality_files).
 
     Raises:
         Any exception from the pipeline propagates back to the asyncio caller.
@@ -85,7 +87,7 @@ def _run_pipeline_sync(job_dict: dict) -> tuple[str, str]:
     selected_audio_source_path = job.selected_audio_source_path or ""
 
     print(f"[job_runner] Job {job.job_id} complete → {output}")
-    return output, selected_audio_source_path
+    return output, selected_audio_source_path, job.excluded_low_quality_files
 
 
 # ---------------------------------------------------------------------------
@@ -108,19 +110,23 @@ async def _execute_job(job: MulticamJob) -> None:
     try:
         # Offload the blocking pipeline to a process pool worker.
         # run_in_executor bridges asyncio and the ProcessPoolExecutor.
-        output_path, selected_audio_source_path = await loop.run_in_executor(
+        output_path, selected_audio_source_path, excluded_low_quality_files = await loop.run_in_executor(
             _executor,
             _run_pipeline_sync,
             job.to_dict(),  # pass as plain dict — must be picklable
         )
         job.output_path = output_path
         job.selected_audio_source_path = selected_audio_source_path
+        job.excluded_low_quality_files = excluded_low_quality_files
         job.mark_complete()
 
     except Exception as exc:
-        error_detail = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
-        job.mark_failed(error_detail)
-        print(f"[job_runner] Job {job.job_id} FAILED:\n{error_detail}")
+        # Keep the traceback in server logs only; job.error is user-facing and
+        # gets translated to plain language on the frontend, so it must stay
+        # free of stack traces and file paths.
+        user_message = f"{type(exc).__name__}: {exc}"
+        job.mark_failed(user_message)
+        print(f"[job_runner] Job {job.job_id} FAILED:\n{user_message}\n{traceback.format_exc()}")
 
     finally:
         # Always persist the final state back to the store
@@ -155,6 +161,26 @@ async def submit_job(job: MulticamJob) -> str:
     return job.job_id
 
 
+def _purge_expired_local_jobs() -> None:
+    """Lazily delete local output files for COMPLETE jobs past expires_at (24h default)."""
+    now = datetime.now(timezone.utc)
+    for job in _job_store.values():
+        if job.status != JobStatus.COMPLETE or not job.expires_at or getattr(job, "output_purged", False):
+            continue
+        try:
+            expires_at = datetime.fromisoformat(job.expires_at)
+        except ValueError:
+            continue
+        if now < expires_at:
+            continue
+        if job.output_path and os.path.isfile(job.output_path):
+            try:
+                os.remove(job.output_path)
+            except OSError:
+                pass
+        job.output_purged = True
+
+
 def get_job_status(job_id: str) -> Optional[dict]:
     """
     Retrieve the current status of a job from the in-memory store.
@@ -165,6 +191,7 @@ def get_job_status(job_id: str) -> Optional[dict]:
     Returns:
         Serialized job dict, or None if the job_id is not found.
     """
+    _purge_expired_local_jobs()
     job = _job_store.get(job_id)
     return job.to_dict() if job else None
 
@@ -177,6 +204,7 @@ def list_jobs() -> list:
     Returns:
         List of serialized job dicts ordered by created_at descending.
     """
+    _purge_expired_local_jobs()
     return sorted(
         [j.to_dict() for j in _job_store.values()],
         key=lambda j: j["created_at"],

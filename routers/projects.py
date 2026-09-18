@@ -177,6 +177,7 @@ class AddUploadRequest(BaseModel):
     user_name: Optional[str] = None
     files:     List[str]
     terms_accepted: bool = False
+    has_timing_override: bool = False
 
 
 class NotificationSettingsRequest(BaseModel):
@@ -204,10 +205,22 @@ class JoinRequestCreateRequest(BaseModel):
     match_token: str
     display_name: Optional[str] = None
     message: Optional[str] = None
+    requests_render_share: bool = False
 
 
 class JoinRequestDecisionRequest(BaseModel):
     decision: str
+
+
+class VenuePresenceRequest(BaseModel):
+    latitude: float
+    longitude: float
+    radius_meters: float = 100.0
+    is_recording: bool = True
+    event_type: Optional[str] = None
+    project_id: Optional[str] = None
+    allow_proximity_alerts: bool = True
+    display_name: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +532,15 @@ async def create_join_request(req: JoinRequestCreateRequest, _claims: dict = Dep
     if any(item.get("requester_id") == requester_id and item.get("status") == "pending" for item in requests):
         raise HTTPException(status_code=409, detail="You already have a pending request for this project.")
     request_id = str(uuid.uuid4())
-    requests.append({"request_id": request_id, "requester_id": requester_id, "display_name": (req.display_name or requester_id).strip()[:80], "message": (req.message or "").strip()[:500], "status": "pending", "created_at": _now()})
+    requests.append({
+        "request_id": request_id,
+        "requester_id": requester_id,
+        "display_name": (req.display_name or requester_id).strip()[:80],
+        "message": (req.message or "").strip()[:500],
+        "requests_render_share": bool(req.requests_render_share),
+        "status": "pending",
+        "created_at": _now(),
+    })
     project["updated_at"] = _now()
     _persist_store()
     if _discovery_settings(project).get("join_request_notifications"):
@@ -696,6 +717,7 @@ async def add_upload(project_id: str, req: AddUploadRequest, request: Request, _
         "user_name": req.user_name,
         "files":     req.files,
         "added_at":  _now(),
+        "has_timing_override": req.has_timing_override,
     }
     project["uploads"].append(entry)
     contributor_names = project.setdefault("contributor_names", {})
@@ -779,3 +801,101 @@ async def decide_join_request(project_id: str, request_id: str, req: JoinRequest
     project["updated_at"] = _now()
     _persist_store()
     return _project_response(project, request)
+
+
+# ---------------------------------------------------------------------------
+# Live Venue Proximity Presence
+# ---------------------------------------------------------------------------
+
+_venue_presence: Dict[str, dict] = {}
+
+
+def _clean_stale_venue_presence(ttl_seconds: int = 600) -> None:
+    now = time.time()
+    stale_keys = [uid for uid, item in _venue_presence.items() if (now - item.get("last_seen", 0)) > ttl_seconds]
+    for uid in stale_keys:
+        _venue_presence.pop(uid, None)
+
+
+@router.post("/venue/presence")
+async def update_venue_presence(req: VenuePresenceRequest, _claims: dict = Depends(require_auth)):
+    """
+    Register or update active venue presence for live proximity discovery.
+    Alerts the user if other creators are actively filming within N meters.
+    """
+    user_id = principal_id_from_claims(_claims)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    _clean_stale_venue_presence()
+
+    now = time.time()
+    _venue_presence[user_id] = {
+        "user_id": user_id,
+        "latitude": req.latitude,
+        "longitude": req.longitude,
+        "radius_meters": req.radius_meters,
+        "is_recording": req.is_recording,
+        "event_type": req.event_type,
+        "project_id": req.project_id,
+        "allow_proximity_alerts": req.allow_proximity_alerts,
+        "display_name": req.display_name or "Nearby Creator",
+        "last_seen": now,
+    }
+
+    if not req.allow_proximity_alerts:
+        return {
+            "status": "registered",
+            "nearby_count": 0,
+            "nearby_creators": [],
+            "alert": None,
+        }
+
+    nearby_creators = []
+    for other_id, other in _venue_presence.items():
+        if other_id == user_id:
+            continue
+        if not other.get("allow_proximity_alerts", True):
+            continue
+
+        try:
+            dist_km = _distance_km(req.latitude, req.longitude, other["latitude"], other["longitude"])
+            dist_meters = round(dist_km * 1000, 1)
+            threshold_meters = max(req.radius_meters, other.get("radius_meters", 100.0))
+
+            if dist_meters <= threshold_meters:
+                nearby_creators.append({
+                    "distance_meters": dist_meters,
+                    "is_recording": other.get("is_recording", True),
+                    "event_type": other.get("event_type"),
+                    "project_id": other.get("project_id"),
+                    "last_seen_seconds_ago": int(now - other.get("last_seen", now)),
+                })
+        except Exception:
+            continue
+
+    alert_message = None
+    if nearby_creators:
+        count = len(nearby_creators)
+        closest_m = int(min(c["distance_meters"] for c in nearby_creators))
+        alert_message = (
+            f"Another RazorVid creator is filming at this venue (~{closest_m}m away)!"
+            if count == 1
+            else f"{count} other RazorVid creators are filming at this venue (closest ~{closest_m}m)!"
+        )
+
+    return {
+        "status": "active",
+        "nearby_count": len(nearby_creators),
+        "nearby_creators": nearby_creators,
+        "alert": alert_message,
+    }
+
+
+@router.post("/venue/leave")
+async def leave_venue_presence(_claims: dict = Depends(require_auth)):
+    """Remove active venue presence when recording ends or user departs."""
+    user_id = principal_id_from_claims(_claims)
+    if user_id and user_id in _venue_presence:
+        _venue_presence.pop(user_id, None)
+    return {"status": "left"}
