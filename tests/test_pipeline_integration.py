@@ -103,6 +103,34 @@ def test_ingestion_excludes_low_res_companion_when_enough_angles_remain(monkeypa
     assert {m.path for m in results} == {"cam1.mov", "cam2.mov"}
 
 
+def test_ingestion_reports_all_low_res_files_when_render_cannot_proceed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    When every uploaded file is too low resolution (e.g. all compressed by
+    iMessage/SMS on the way to the app), the error must name all affected
+    files and explain the likely cause — not just repeat one arbitrary file's
+    reason as if it were the only problem.
+    """
+    from multicam_pipeline.ingestion import validate_and_ingest
+
+    low_res_probe = {
+        "streams": [
+            {"codec_type": "audio", "channels": 1},
+            {"codec_type": "video", "width": 480, "height": 360, "r_frame_rate": "24/1"},
+        ],
+        "format": {"duration": "150.0"},
+    }
+    monkeypatch.setattr("multicam_pipeline.ingestion._run_ffprobe", lambda _: low_res_probe)
+    monkeypatch.setattr("os.path.isfile", lambda _: True)
+
+    with pytest.raises(ValueError) as excinfo:
+        validate_and_ingest(["a.mov", "b.mov", "c.mov"])
+
+    message = str(excinfo.value)
+    assert "b.mov" in message and "c.mov" in message
+    assert "3 of 3" in message
+    assert "iMessage" in message
+
+
 def test_ffmpeg_command_caps_threads_for_long_renders() -> None:
     from multicam_pipeline.rendering import build_ffmpeg_command
 

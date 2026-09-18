@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
 
+# Minimum short-side resolution (px) for a file to count as a real camera
+# angle. Configurable so it can be temporarily lowered (e.g. for a practice
+# render using already-uploaded low-res footage) without a code change.
+MIN_VIDEO_SHORT_SIDE_PX = int(os.environ.get("MIN_VIDEO_SHORT_SIDE_PX", "480"))
+
 
 @dataclass
 class VideoMetadata:
@@ -191,7 +196,7 @@ def validate_and_ingest(video_paths: List[str]) -> List[VideoMetadata]:
         raise ValueError("No video paths provided.")
 
     results: List[VideoMetadata] = []
-    low_res_skips: List[str] = []
+    low_res_skips: List[tuple[str, str]] = []  # (path, resolution) for each excluded file
 
     for path in video_paths:
         print(f"[ingestion] Ingesting '{path}'...")
@@ -205,14 +210,13 @@ def validate_and_ingest(video_paths: List[str]) -> List[VideoMetadata]:
             raise ValueError(f"'{path}' has no audio stream. Audio is required for sync.")
         if meta.fps <= 0:
             raise ValueError(f"'{path}' has invalid FPS: {meta.fps}")
-        if min(meta.width, meta.height) < 480:
-            reason = (
-                f"'{path}' video resolution {meta.resolution} is too low. "
-                f"Minimum short-side is 480px. This file may be an audio-only "
-                f"companion or a thumbnail track rather than a camera angle."
-            )
-            low_res_skips.append(reason)
-            print(f"[ingestion]   ✗ excluding low-resolution companion file: {reason}")
+        if min(meta.width, meta.height) < MIN_VIDEO_SHORT_SIDE_PX:
+            # Note: this is frequently *real* footage that was auto-compressed
+            # during sharing (iMessage/SMS, some cloud links) rather than an
+            # actual thumbnail/companion track, so the message must not assume
+            # which cause it is.
+            print(f"[ingestion]   ✗ excluding low-resolution file ({meta.resolution}): '{path}'")
+            low_res_skips.append((path, meta.resolution))
             continue
 
         print(
@@ -222,12 +226,24 @@ def validate_and_ingest(video_paths: List[str]) -> List[VideoMetadata]:
         results.append(meta)
 
     if len(results) < 2 and low_res_skips:
-        # Not enough real camera angles remain once companion files are excluded —
-        # surface the original per-file reason so callers get the specific detail.
-        raise ValueError(low_res_skips[0])
+        first_path, first_resolution = low_res_skips[0]
+        base_reason = (
+            f"'{first_path}' video resolution {first_resolution} is too low. "
+            f"Minimum short-side is {MIN_VIDEO_SHORT_SIDE_PX}px. This can happen with a thumbnail/companion "
+            f"track, or with real footage that was auto-compressed while sharing "
+            f"(e.g. sent over iMessage/SMS or a low-quality cloud link)."
+        )
+        if len(low_res_skips) > 1:
+            other_names = ", ".join(os.path.basename(p) for p, _ in low_res_skips[1:])
+            base_reason += (
+                f" {len(low_res_skips)} of {len(video_paths)} uploaded files were too low "
+                f"resolution to use ({other_names} also affected), leaving only "
+                f"{len(results)} usable angle(s) — at least 2 are required. Try re-uploading "
+                f"the original files directly (e.g. via AirDrop or a direct file transfer) "
+                f"instead of a shared/forwarded copy."
+            )
+        raise ValueError(base_reason)
     if not results:
         raise ValueError("No usable video files after validation.")
-
-    return results
 
     return results

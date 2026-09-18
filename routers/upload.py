@@ -47,19 +47,30 @@ async def _save_local(file: UploadFile, upload_id: str) -> str:
     """
     Save an uploaded file to LOCAL_UPLOAD_DIR.
 
+    Writes to a temp path and renames only after the full stream is received,
+    so a dropped client connection mid-upload can never leave a truncated
+    file behind for the render pipeline to pick up.
+
     Returns the absolute local file path.
     """
     os.makedirs(LOCAL_UPLOAD_DIR, exist_ok=True)
     dest = os.path.join(LOCAL_UPLOAD_DIR, f"{upload_id}_{file.filename}")
+    tmp_dest = f"{dest}.part"
 
     total_bytes = 0
-    with open(dest, "wb") as f:
-        # Stream in 1MB chunks — never loads the full file into memory
-        while chunk := await file.read(1024 * 1024):
-            total_bytes += len(chunk)
-            if total_bytes > MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail="File exceeds maximum upload size.")
-            f.write(chunk)
+    try:
+        with open(tmp_dest, "wb") as f:
+            # Stream in 1MB chunks — never loads the full file into memory
+            while chunk := await file.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="File exceeds maximum upload size.")
+                f.write(chunk)
+        os.replace(tmp_dest, dest)
+    except (HTTPException, Exception):
+        if os.path.exists(tmp_dest):
+            os.remove(tmp_dest)
+        raise
 
     return dest
 
