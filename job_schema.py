@@ -91,11 +91,13 @@ class MulticamJob:
     selected_audio_source_path: Optional[str] = None
     sync_diagnostics:         Optional[dict]  = None
     project_id:               Optional[str]   = None
+    output_parts:             List[str]        = field(default_factory=list)
     max_duration:             Optional[float] = 240.0
     auto_split:               bool            = True
     part_index:               Optional[int]   = None
     total_parts:              Optional[int]   = None
     force_full_track_sync:    bool            = False
+    angle_failures:          List[dict[str, str]] = field(default_factory=list)
     # Basenames of input files silently dropped for being below the 480px
     # minimum resolution (typically iPhone/Photos thumbnail or companion tracks).
     excluded_low_quality_files: List[str]     = field(default_factory=list)
@@ -134,11 +136,13 @@ class MulticamJob:
             "selected_audio_source_path": self.selected_audio_source_path,
             "sync_diagnostics":         self.sync_diagnostics,
             "project_id":              self.project_id,
+            "output_parts":            self.output_parts,
             "max_duration":            self.max_duration,
             "auto_split":              self.auto_split,
             "part_index":              self.part_index,
             "total_parts":             self.total_parts,
             "force_full_track_sync":   self.force_full_track_sync,
+            "angle_failures":          self.angle_failures,
             "excluded_low_quality_files": self.excluded_low_quality_files,
             "status":                  self.status.value,
             "error":                   self.error,
@@ -171,11 +175,13 @@ class MulticamJob:
             selected_audio_source_path = data.get("selected_audio_source_path"),
             sync_diagnostics          = data.get("sync_diagnostics"),
             project_id               = data.get("project_id"),
+            output_parts             = list(data.get("output_parts") or []),
             max_duration             = float(data["max_duration"]) if data.get("max_duration") is not None else 240.0,
             auto_split               = bool(data.get("auto_split", True)),
             part_index               = int(data["part_index"]) if data.get("part_index") is not None else None,
             total_parts              = int(data["total_parts"]) if data.get("total_parts") is not None else None,
             force_full_track_sync    = bool(data.get("force_full_track_sync", False)),
+            angle_failures           = list(data.get("angle_failures") or []),
             excluded_low_quality_files = list(data.get("excluded_low_quality_files") or []),
             status                   = JobStatus(data.get("status", JobStatus.PENDING)),
             error                    = data.get("error"),

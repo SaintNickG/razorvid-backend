@@ -66,6 +66,7 @@ class AngleSignals:
         beat_frames:    Boolean mask — True at beat-aligned frames.
         rek_score:      Rekognition composite quality score (paid tier only).
         view_signature: Compact visual fingerprint for camera-view similarity.
+        framing_score:  Visual framing score rewarding upper-half subject framing.
     """
     path:         str
     offset:       float
@@ -76,6 +77,7 @@ class AngleSignals:
     beat_frames:  np.ndarray
     rek_score:    Optional[np.ndarray] = None
     view_signature: Optional[np.ndarray] = None
+    framing_score: Optional[np.ndarray] = None
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +201,67 @@ def _compute_motion_score(
     if max_val > 0:
         motion /= max_val
     return motion
+
+
+def _framing_quality_for_frame(frame: np.ndarray) -> float:
+    """Score how well the subject is framed within the upper portion of the shot."""
+    if frame is None or frame.size == 0:
+        return 0.5
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    height, width = gray.shape[:2]
+    if height <= 2 or width <= 2:
+        return 0.5
+
+    threshold_value = max(30, int(gray.mean() * 0.8))
+    _, binary = cv2.threshold(gray, threshold_value, 255, cv2.THRESH_BINARY)
+    positive = binary > 0
+    if not np.any(positive):
+        return 0.5
+
+    upper = positive[:height // 2].sum()
+    lower = positive[height // 2:].sum()
+    total = max(1, upper + lower)
+    centroid_y = np.argwhere(positive).mean(axis=0)[0] if np.any(positive) else height / 2.0
+    centroid_share = 1.0 - (centroid_y / max(1.0, height))
+    upper_share = upper / total
+    lower_share = lower / total
+
+    return float(np.clip((0.75 * (upper_share - lower_share)) + (0.25 * centroid_share), -1.0, 1.0))
+
+
+def _compute_framing_score(
+    video_path: str,
+    times: np.ndarray,
+    offset: float,
+) -> np.ndarray:
+    """Estimate how well each sampled frame keeps the main subject in the upper half."""
+    if len(times) == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    cap = cv2.VideoCapture(video_path)
+    source_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    frame_step = max(1, int(round(source_fps / MOTION_ANALYSIS_FPS)))
+    sampled_times: List[float] = []
+    sampled_scores: List[float] = []
+    frame_index = 0
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if frame_index % frame_step == 0:
+            source_time = frame_index / source_fps
+            sampled_times.append(source_time + offset)
+            sampled_scores.append(_framing_quality_for_frame(frame))
+        frame_index += 1
+
+    cap.release()
+
+    if len(sampled_times) < 2:
+        return np.full(len(times), 0.5, dtype=np.float32)
+
+    return np.interp(times, sampled_times, sampled_scores, left=0.5, right=0.5).astype(np.float32)
 
 
 def _compute_view_signature(video_path: str, duration: float) -> Optional[np.ndarray]:
@@ -764,6 +827,8 @@ def _pick_best_angle(
         signal_idx = int(np.searchsorted(sig.times, current_t, side="right") - 1)
         signal_idx = max(0, min(signal_idx, len(sig.times) - 1))
         s = score_fn(sig, signal_idx, strategy)
+        if sig.framing_score is not None:
+            s += 0.18 * sig.framing_score[signal_idx]
 
         # Small penalty for repeating the same angle — encourages variety
         if sig.path == last_path:
@@ -834,6 +899,7 @@ def _analyze_angle(
     motion = _compute_motion_score(path, times, offset)
 
     view_signature = _compute_view_signature(path, duration)
+    framing_score = _compute_framing_score(path, times, offset)
 
     # Step 4: Rekognition (paid tier only)
     rek_score = None
@@ -853,6 +919,7 @@ def _analyze_angle(
         beat_frames  = beats,
         rek_score    = rek_score,
         view_signature = view_signature,
+        framing_score = framing_score,
     )
 
 

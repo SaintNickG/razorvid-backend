@@ -157,7 +157,11 @@ def _upload_to_s3(local_path: str, output_s3_uri: str) -> str:
 # Core pipeline runner
 # ---------------------------------------------------------------------------
 
-def _run_pipeline(job: MulticamJob, local_video_paths: list, local_output_path: str) -> tuple[str, str, dict, list[str]]:
+def _run_pipeline(
+    job: MulticamJob,
+    local_video_paths: list,
+    local_output_path: str,
+) -> tuple[str, list[str], str, dict, list[str], list[dict[str, str]], str | None]:
     """
     Execute the full multicam pipeline against locally downloaded files.
 
@@ -196,18 +200,37 @@ def _run_pipeline(job: MulticamJob, local_video_paths: list, local_output_path: 
         selected_audio_source_path=job.selected_audio_source_path,
         sync_diagnostics=job.sync_diagnostics,
         project_id=job.project_id,
+        angle_failures=job.angle_failures,
         force_full_track_sync=job.force_full_track_sync,
+        max_duration=job.max_duration,
+        auto_split=job.auto_split,
+        part_index=job.part_index,
+        total_parts=job.total_parts,
         status=job.status,
         error=job.error,
         created_at=job.created_at,
         updated_at=job.updated_at,
     )
-    output_path = run_multicam_job(local_job)
+    try:
+        output_path = run_multicam_job(local_job)
+    except Exception as exc:
+        return (
+            "",
+            [],
+            local_job.selected_audio_source_path or "",
+            local_job.sync_diagnostics or {},
+            local_job.excluded_low_quality_files,
+            local_job.angle_failures,
+            f"{type(exc).__name__}: {exc}",
+        )
     return (
         output_path,
+        local_job.output_parts or [output_path],
         (local_job.selected_audio_source_path or ""),
         local_job.sync_diagnostics,
         local_job.excluded_low_quality_files,
+        local_job.angle_failures,
+        None,
     )
 
 
@@ -262,6 +285,7 @@ def lambda_handler(event: dict, context: Any) -> dict:
     for record in event.get("Records", []):
         message_id = record["messageId"]
         job = None
+        pipeline_error = None
 
         try:
             # --- Parse the SQS message body into a MulticamJob ---
@@ -289,21 +313,53 @@ def lambda_handler(event: dict, context: Any) -> dict:
                 local_output_path = os.path.join(tmp_dir, "output.mp4")
 
                 # Step 3: Run the full pipeline against local files
-                local_output_result, selected_audio_source_path, sync_diagnostics, excluded_low_quality_files = _run_pipeline(
+                local_output_result, local_output_parts, selected_audio_source_path, sync_diagnostics, excluded_low_quality_files, angle_failures, pipeline_error = _run_pipeline(
                     job,
                     local_video_paths,
                     local_output_path,
                 )
                 job.sync_diagnostics = sync_diagnostics
                 job.excluded_low_quality_files = excluded_low_quality_files
+                job.angle_failures = angle_failures
                 job.selected_audio_source_path = _map_local_source_to_original_uri(
                     selected_audio_source_path,
                     local_video_paths,
                     job.video_paths,
                 )
+                if pipeline_error:
+                    raise RuntimeError(pipeline_error)
 
-                # Step 4: Upload rendered MP4 back to S3
-                _upload_to_s3(local_output_result, job.output_path)
+                # Step 4: Upload every rendered part; output_path stays the first part for older clients.
+                bucket, output_key = _parse_s3_uri(job.output_path)
+                output_prefix = os.path.dirname(output_key)
+                s3_output_parts = []
+                job.total_parts = len(local_output_parts)
+                try:
+                    for part_path in local_output_parts:
+                        if len(local_output_parts) == 1:
+                            part_uri = job.output_path
+                        else:
+                            part_key = f"{output_prefix}/{os.path.basename(part_path)}"
+                            part_uri = f"s3://{bucket}/{part_key}"
+                        _upload_to_s3(part_path, part_uri)
+                        s3_output_parts.append(part_uri)
+                        job.output_parts = list(s3_output_parts)
+                        if len(s3_output_parts) == 1:
+                            job.output_path = part_uri
+                        _upsert_job_status(job)
+                except Exception:
+                    for uploaded_uri in s3_output_parts:
+                        try:
+                            uploaded_bucket, uploaded_key = _parse_s3_uri(uploaded_uri)
+                            s3.delete_object(Bucket=uploaded_bucket, Key=uploaded_key)
+                        except Exception as cleanup_error:
+                            print(f"[aws_handler] Could not clean partial render output {uploaded_uri}: {cleanup_error}")
+                            job.output_parts = []
+                            job.output_path = f"s3://{bucket}/{output_key}"
+                    raise
+                job.output_parts = s3_output_parts
+                job.total_parts = len(s3_output_parts)
+                job.output_path = s3_output_parts[0] if s3_output_parts else job.output_path
 
             # --- Mark job as COMPLETE in DynamoDB ---
             job.mark_complete()
@@ -315,12 +371,17 @@ def lambda_handler(event: dict, context: Any) -> dict:
             if job.project_id:
                 project = _get_project(job.project_id)
                 if project and project.get("notification_settings", {}).get("render_outcome", False):
-                    send_render_complete(job.job_id, project.get("name", "your project"), project.get("owner_id", ""))
+                    send_render_complete(
+                        job.job_id,
+                        project.get("name", "your project"),
+                        project.get("owner_id", ""),
+                        job.angle_failures,
+                    )
 
         except Exception as exc:
             # job.error is user-facing (translated to plain language on the
             # frontend) — keep the traceback in CloudWatch logs only.
-            user_message = f"{type(exc).__name__}: {exc}"
+            user_message = pipeline_error or f"{type(exc).__name__}: {exc}"
             print(f"[aws_handler] Job failed (SQS message {message_id}):\n{user_message}\n{traceback.format_exc()}")
 
             # Update DynamoDB with failure details if we have a job object
@@ -332,7 +393,12 @@ def lambda_handler(event: dict, context: Any) -> dict:
                 if job.project_id:
                     project = _get_project(job.project_id)
                     if project and project.get("notification_settings", {}).get("render_outcome", False):
-                        send_render_failed(job.job_id, project.get("name", "your project"), project.get("owner_id", ""))
+                        send_render_failed(
+                            job.job_id,
+                            project.get("name", "your project"),
+                            project.get("owner_id", ""),
+                            job.angle_failures,
+                        )
 
             # Report this message as a batch failure so SQS retries it
             batch_failures.append({"itemIdentifier": message_id})

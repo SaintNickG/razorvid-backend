@@ -15,6 +15,7 @@ Environment variables:
 
 import os
 import logging
+from html import escape
 
 import boto3
 from botocore.exceptions import ClientError
@@ -95,7 +96,12 @@ def send_join_request_received(project_name: str, owner_id: str, requester_name:
     )
 
 
-def send_render_complete(job_id: str, project_name: str, owner_id: str) -> None:
+def send_render_complete(
+    job_id: str,
+    project_name: str,
+    owner_id: str,
+    angle_failures: list[dict[str, str]] | None = None,
+) -> None:
     """Send a render-complete email to the project owner. Never raises."""
     if not _from_email:
         log.info("[notify] SES_FROM_EMAIL not set — skipping notification for job %s", job_id)
@@ -108,16 +114,35 @@ def send_render_complete(job_id: str, project_name: str, owner_id: str) -> None:
             return
 
         render_url = f"{_app_url}/render/{job_id}"
+        angle_failures = angle_failures or []
+        failure_text = ""
+        failure_html = ""
+        subject = f"Your RazorVid render is ready — {project_name}"
+        if angle_failures:
+            failure_text = (
+                "\n\nSome angles could not be used; the render used the remaining good angles:\n"
+                + "\n".join(f"- {item['file']}: {item['reason']}" for item in angle_failures)
+            )
+            failure_html = (
+                "<p>Some angles could not be used; the render used the remaining good angles:</p><ul>"
+                + "".join(
+                    f"<li><strong>{escape(item['file'])}</strong>: {escape(item['reason'])}</li>"
+                    for item in angle_failures
+                )
+                + "</ul>"
+            )
+            subject = f"Your RazorVid render is ready with skipped angles — {project_name}"
 
         _ses.send_email(
             Source=_from_email,
             Destination={"ToAddresses": [email]},
             Message={
-                "Subject": {"Data": f"Your RazorVid render is ready — {project_name}"},
+                "Subject": {"Data": subject},
                 "Body": {
                     "Text": {
                         "Data": (
                             f"Your multicam render for \"{project_name}\" is complete.\n\n"
+                            f"{failure_text}\n\n"
                             f"Download your video here:\n{render_url}\n\n"
                             "— The RazorVid Team"
                         )
@@ -125,6 +150,7 @@ def send_render_complete(job_id: str, project_name: str, owner_id: str) -> None:
                     "Html": {
                         "Data": (
                             f"<p>Your multicam render for <strong>{project_name}</strong> is complete.</p>"
+                            f"{failure_html}"
                             f"<p><a href=\"{render_url}\">Download your video</a></p>"
                             "<p>— The RazorVid Team</p>"
                         )
@@ -139,7 +165,12 @@ def send_render_complete(job_id: str, project_name: str, owner_id: str) -> None:
         log.warning("[notify] Failed to send render-complete email for job %s: %s", job_id, exc)
 
 
-def send_render_failed(job_id: str, project_name: str, owner_id: str) -> None:
+def send_render_failed(
+    job_id: str,
+    project_name: str,
+    owner_id: str,
+    angle_failures: list[dict[str, str]] | None = None,
+) -> None:
     """Send a render-failed email to the project owner. Never raises."""
     if not _from_email:
         return
@@ -150,6 +181,22 @@ def send_render_failed(job_id: str, project_name: str, owner_id: str) -> None:
             return
 
         render_url = f"{_app_url}/render/{job_id}"
+        angle_failures = angle_failures or []
+        failure_text = ""
+        failure_html = ""
+        if angle_failures:
+            failure_text = (
+                "\n\nAngles that could not be used:\n"
+                + "\n".join(f"- {item['file']}: {item['reason']}" for item in angle_failures)
+            )
+            failure_html = (
+                "<p>Angles that could not be used:</p><ul>"
+                + "".join(
+                    f"<li><strong>{escape(item['file'])}</strong>: {escape(item['reason'])}</li>"
+                    for item in angle_failures
+                )
+                + "</ul>"
+            )
 
         _ses.send_email(
             Source=_from_email,
@@ -160,6 +207,7 @@ def send_render_failed(job_id: str, project_name: str, owner_id: str) -> None:
                     "Text": {
                         "Data": (
                             f"Your multicam render for \"{project_name}\" encountered an error.\n\n"
+                            f"{failure_text}\n\n"
                             f"View details and resubmit here:\n{render_url}\n\n"
                             "— The RazorVid Team"
                         )
@@ -167,6 +215,7 @@ def send_render_failed(job_id: str, project_name: str, owner_id: str) -> None:
                     "Html": {
                         "Data": (
                             f"<p>Your multicam render for <strong>{project_name}</strong> encountered an error.</p>"
+                            f"{failure_html}"
                             f"<p><a href=\"{render_url}\">View details and resubmit</a></p>"
                             "<p>— The RazorVid Team</p>"
                         )

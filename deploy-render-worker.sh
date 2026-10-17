@@ -61,7 +61,7 @@ aws iam attach-role-policy --role-name "$WORKER_ROLE_NAME" --policy-arn arn:aws:
 jq -n --arg input "$INPUT_BUCKET" --arg output "$OUTPUT_BUCKET" --arg queue "$QUEUE_ARN" --arg region "$AWS_REGION" --arg account "$AWS_ACCOUNT_ID" --arg projects "$PROJECTS_DYNAMODB_TABLE" '
   {Version:"2012-10-17",Statement:[
     {Effect:"Allow",Action:["s3:GetObject","s3:ListBucket"],Resource:[("arn:aws:s3:::" + $input), ("arn:aws:s3:::" + $input + "/*")]},
-    {Effect:"Allow",Action:["s3:PutObject","s3:GetObject","s3:ListBucket"],Resource:[("arn:aws:s3:::" + $output), ("arn:aws:s3:::" + $output + "/*")]},
+    {Effect:"Allow",Action:["s3:PutObject","s3:GetObject","s3:DeleteObject","s3:ListBucket"],Resource:[("arn:aws:s3:::" + $output), ("arn:aws:s3:::" + $output + "/*")]},
     {Effect:"Allow",Action:["dynamodb:PutItem","dynamodb:GetItem","dynamodb:UpdateItem","dynamodb:BatchWriteItem","dynamodb:Scan"],Resource:[("arn:aws:dynamodb:" + $region + ":" + $account + ":table/multicam-jobs"), ("arn:aws:dynamodb:" + $region + ":" + $account + ":table/" + $projects)]},
     {Effect:"Allow",Action:["sqs:ReceiveMessage","sqs:DeleteMessage","sqs:GetQueueAttributes","sqs:ChangeMessageVisibility"],Resource:$queue},
     {Effect:"Allow",Action:["ses:SendEmail"],Resource:"*"},

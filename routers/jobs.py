@@ -100,6 +100,7 @@ class JobStatusResponse(BaseModel):
     job_id:      str
     status:      str
     output_path: Optional[str] = None
+    output_parts: List[str] = Field(default_factory=list)
     project_id:  Optional[str] = None
     audio_master_source: Optional[str] = None
     sync_diagnostics: Optional[Dict[str, dict]] = None
@@ -109,6 +110,7 @@ class JobStatusResponse(BaseModel):
     expires_at:  Optional[str] = None
     output_purged: bool = False
     excluded_low_quality_files: List[str] = []
+    angle_failures: List[Dict[str, str]] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +316,7 @@ async def submit_render(req: RenderRequest, _claims: dict = Depends(require_auth
         job_id      = job.job_id,
         status      = job.status.value,
         output_path = job.output_path,
+        output_parts = job.output_parts,
         project_id  = job.project_id,
         audio_master_source = job.selected_audio_source_path,
         sync_diagnostics = job.sync_diagnostics,
@@ -323,6 +326,7 @@ async def submit_render(req: RenderRequest, _claims: dict = Depends(require_auth
         expires_at  = job.expires_at,
         output_purged = job.output_purged,
         excluded_low_quality_files = job.excluded_low_quality_files,
+        angle_failures = job.angle_failures,
     )
 
 
@@ -354,6 +358,7 @@ async def get_status(job_id: str, _claims: dict = Depends(require_auth)):
         job_id      = data["job_id"],
         status      = data["status"],
         output_path = data.get("output_path"),
+        output_parts = list(data.get("output_parts") or []),
         project_id  = data.get("project_id"),
         audio_master_source = data.get("selected_audio_source_path"),
         sync_diagnostics = data.get("sync_diagnostics"),
@@ -363,6 +368,7 @@ async def get_status(job_id: str, _claims: dict = Depends(require_auth)):
         expires_at  = data.get("expires_at"),
         output_purged = bool(data.get("output_purged", False)),
         excluded_low_quality_files = list(data.get("excluded_low_quality_files") or []),
+        angle_failures = list(data.get("angle_failures") or []),
     )
 
 

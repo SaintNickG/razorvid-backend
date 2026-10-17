@@ -18,6 +18,7 @@ Endpoints:
 import json
 import io
 import os
+import re
 import uuid
 import base64
 import hashlib
@@ -310,8 +311,19 @@ def _invite_url(invite_code: str, request: Request) -> str:
     return f"{_base_url(request)}/?invite={invite_code.upper()}"
 
 
-def _project_response(project: dict, request: Request) -> dict:
+def _project_response(project: dict, request: Request, viewer_id: Optional[str] = None) -> dict:
     result = dict(project)
+    blocked_users = set(result.pop("blocked_users", []) or [])
+    is_owner = bool(viewer_id and viewer_id == project.get("owner_id"))
+    uploads = project.get("uploads") or []
+    if viewer_id:
+        uploads = [upload for upload in uploads if upload.get("user_id") not in blocked_users]
+    result["uploads"] = []
+    for upload in uploads:
+        safe_upload = dict(upload)
+        if not is_owner:
+            safe_upload.pop("guest_contact_email", None)
+        result["uploads"].append(safe_upload)
     result["invite_url"] = _invite_url(project["invite_code"], request)
     return result
 
@@ -409,6 +421,52 @@ def register_project_job(project_id: str, job_id: str) -> None:
         _persist_store()
 
 
+def remove_account_projects(actor_id: str) -> tuple[list[str], set[str]]:
+    """Remove an account's projects and contributions from the project store."""
+    _refresh_store()
+    media_refs: list[str] = []
+    deleted_project_ids: set[str] = set()
+
+    for project_id, project in list(_projects.items()):
+        uploads = project.get("uploads") or []
+        actor_uploads = [upload for upload in uploads if upload.get("user_id") == actor_id]
+        media_refs.extend(
+            file_ref
+            for upload in actor_uploads
+            for file_ref in (upload.get("files") or [])
+        )
+
+        if project.get("owner_id") == actor_id:
+            deleted_project_ids.add(project_id)
+            _projects.pop(project_id, None)
+            invite_code = str(project.get("invite_code") or "").upper()
+            _invite_index.pop(invite_code, None)
+            if _use_dynamodb():
+                table = _ddb_table()
+                table.delete_item(Key={"pk": f"PROJECT#{project_id}", "sk": "PROFILE"})
+                if invite_code:
+                    table.delete_item(Key={"pk": f"INVITE#{invite_code}", "sk": "MAP"})
+            continue
+
+        if not actor_uploads and actor_id not in (project.get("members") or []):
+            continue
+
+        project["uploads"] = [upload for upload in uploads if upload.get("user_id") != actor_id]
+        project["members"] = [member for member in (project.get("members") or []) if member != actor_id]
+        project.get("contributor_names", {}).pop(actor_id, None)
+        project["join_requests"] = [
+            request for request in (project.get("join_requests") or [])
+            if request.get("requester_id") != actor_id
+        ]
+        for contribution in (project.get("render_contributions") or {}).values():
+            contribution.get("duration_by_user", {}).pop(actor_id, None)
+            contribution.get("contributor_names", {}).pop(actor_id, None)
+        project["updated_at"] = _now()
+
+    _persist_store()
+    return media_refs, deleted_project_ids
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -430,6 +488,7 @@ async def create_project(req: CreateProjectRequest, request: Request, _claims: d
         "owner_id":    owner_id,
         "invite_code": invite_code,
         "members":     [owner_id],
+        "blocked_users": [],
         "uploads":     [],          # list of {upload_id, user_id, files}
         "contributor_names": {owner_id: owner_id},
         "render_contributions": {},
@@ -449,7 +508,7 @@ async def create_project(req: CreateProjectRequest, request: Request, _claims: d
     _invite_index[invite_code] = project_id
     _persist_store()
 
-    return _project_response(project, request)
+    return _project_response(project, request, owner_id)
 
 
 @router.get("")
@@ -457,18 +516,42 @@ async def list_projects(request: Request, _claims: dict = Depends(require_auth))
     _refresh_store()
     actor_id = principal_id_from_claims(_claims)
     if actor_id:
-        return [_project_response(p, request) for p in _projects.values() if actor_id in (p.get("members") or [])]
+        return [_project_response(p, request, actor_id) for p in _projects.values() if actor_id in (p.get("members") or [])]
     return [_project_response(p, request) for p in _projects.values()]
 
 
-def _guest_project_response(project: dict) -> dict:
-    return {
+def _normalize_contributor_name(name: str) -> str:
+    return " ".join(name.strip().split())
+
+
+def _next_contributor_angle_number(project: dict, contributor_name: str) -> int:
+    normalized_name = _normalize_contributor_name(contributor_name)
+    angle_count = sum(
+        len(upload.get("files") or [])
+        for upload in project.get("uploads") or []
+        if _normalize_contributor_name(str(upload.get("user_name") or "")) == normalized_name
+    )
+    return angle_count + 1
+
+
+def _contributor_filename(original_name: str, contributor_name: str, angle_number: int) -> str:
+    extension = os.path.splitext(original_name)[1]
+    safe_name = re.sub(r'[\x00-\x1f\\/:*?"<>|]+', "_", _normalize_contributor_name(contributor_name))
+    safe_name = safe_name.strip(" .")[:80] or "Contributor"
+    return f"{safe_name} {angle_number}{extension}"
+
+
+def _guest_project_response(project: dict, contributor_name: Optional[str] = None) -> dict:
+    response = {
         "project_id": project["project_id"],
         "name": project["name"],
         "event_type": project["event_type"],
         "member_count": len(project.get("members") or []),
         "angle_count": sum(len(upload.get("files") or []) for upload in project.get("uploads") or []),
     }
+    if contributor_name:
+        response["next_angle_number"] = _next_contributor_angle_number(project, contributor_name)
+    return response
 
 
 def _project_for_invite(invite_code: str) -> dict:
@@ -482,10 +565,12 @@ def _project_for_invite(invite_code: str) -> dict:
 
 
 @router.get("/share/{invite_code}")
-async def get_guest_project(invite_code: str):
+async def get_guest_project(invite_code: str, contributor_name: Optional[str] = None):
     """Return limited project details for a public guest upload link."""
     _refresh_store()
-    return _guest_project_response(_project_for_invite(invite_code))
+    if contributor_name and len(contributor_name) > 80:
+        raise HTTPException(status_code=422, detail="Contributor name must be 80 characters or fewer.")
+    return _guest_project_response(_project_for_invite(invite_code), contributor_name)
 
 
 @router.post("/discover")
@@ -499,6 +584,8 @@ async def discover_projects(req: DiscoverySearchRequest, _claims: dict = Depends
     matches = []
     for project in _projects.values():
         if requester_id in project.get("members", []):
+            continue
+        if requester_id in (project.get("blocked_users") or []):
             continue
         settings = _discovery_settings(project)
         if not settings.get("discoverable"):
@@ -526,6 +613,8 @@ async def create_join_request(req: JoinRequestCreateRequest, _claims: dict = Dep
     project = _projects.get(_read_match_token(req.match_token, requester_id))
     if not project or not _discovery_settings(project).get("discoverable"):
         raise HTTPException(status_code=404, detail="Matching project is no longer available.")
+    if requester_id in (project.get("blocked_users") or []):
+        raise HTTPException(status_code=403, detail="You are blocked from this project.")
     if requester_id in project.get("members", []):
         raise HTTPException(status_code=409, detail="You are already a project member.")
     requests = project.setdefault("join_requests", [])
@@ -553,15 +642,30 @@ async def add_guest_upload(
     invite_code: str,
     file: UploadFile = File(...),
     guest_name: Optional[str] = Form(None),
+    share_contact: bool = Form(False),
+    guest_contact_email: Optional[str] = Form(None),
     terms_accepted: bool = Form(False),
 ):
     """Accept one guest angle using the invite code as the upload capability."""
     _refresh_store()
     if not terms_accepted:
         raise HTTPException(status_code=400, detail="Terms acceptance is required before uploading.")
+    contributor_name = _normalize_contributor_name(guest_name or "")
+    if not contributor_name:
+        raise HTTPException(status_code=422, detail="Enter your name before uploading.")
+    if len(contributor_name) > 80:
+        raise HTTPException(status_code=422, detail="Contributor name must be 80 characters or fewer.")
+    contact_email = (guest_contact_email or "").strip()
+    if share_contact and (
+        len(contact_email) > 254
+        or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", contact_email)
+    ):
+        raise HTTPException(status_code=422, detail="Enter a valid email address to share contact information.")
     _validate_extension(file.filename or "")
 
     project = _project_for_invite(invite_code)
+    angle_number = _next_contributor_angle_number(project, contributor_name)
+    file.filename = _contributor_filename(file.filename or "", contributor_name, angle_number)
     guest_id = f"guest:{uuid.uuid4()}"
     upload_id = str(uuid.uuid4())
     if IS_AWS:
@@ -570,22 +674,25 @@ async def add_guest_upload(
         file_ref = await _save_local(file, upload_id)
 
     project.setdefault("members", []).append(guest_id)
-    project.setdefault("contributor_names", {})[guest_id] = guest_name or "Guest"
-    project.setdefault("uploads", []).append({
+    project.setdefault("contributor_names", {})[guest_id] = contributor_name
+    upload_entry = {
         "upload_id": upload_id,
         "user_id": guest_id,
-        "user_name": guest_name or "Guest",
+        "user_name": contributor_name,
         "files": [file_ref],
         "added_at": _now(),
-    })
+    }
+    if share_contact:
+        upload_entry["guest_contact_email"] = contact_email
+    project.setdefault("uploads", []).append(upload_entry)
     project["updated_at"] = _now()
     _persist_store()
     settings = _notification_settings(project)
     if settings["member_joined"]:
-        send_member_joined(project["name"], project["owner_id"], guest_name or "Guest")
+        send_member_joined(project["name"], project["owner_id"], contributor_name)
     if settings["angle_uploaded"]:
-        send_angle_uploaded(project["name"], project["owner_id"], guest_name or "Guest", 1)
-    return _guest_project_response(project)
+        send_angle_uploaded(project["name"], project["owner_id"], contributor_name, 1)
+    return _guest_project_response(project, contributor_name)
 
 
 @router.get("/invite/{invite_code}")
@@ -599,7 +706,10 @@ async def resolve_invite(invite_code: str, request: Request, _claims: dict = Dep
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
 
-    return _project_response(project, request)
+    actor_id = principal_id_from_claims(_claims)
+    if actor_id in (project.get("blocked_users") or []):
+        raise HTTPException(status_code=403, detail="You are blocked from this project.")
+    return _project_response(project, request, actor_id)
 
 
 @router.get("/{project_id}")
@@ -611,7 +721,7 @@ async def get_project(project_id: str, request: Request, _claims: dict = Depends
     actor_id = principal_id_from_claims(_claims)
     if actor_id:
         _ensure_member(project, actor_id)
-    return _project_response(project, request)
+    return _project_response(project, request, actor_id)
 
 
 @router.delete("/{project_id}", status_code=204)
@@ -682,6 +792,8 @@ async def join_project(req: JoinProjectRequest, request: Request, _claims: dict 
         raise HTTPException(status_code=404, detail="Invalid invite code.")
 
     project = _projects[project_id]
+    if actor_id in (project.get("blocked_users") or []):
+        raise HTTPException(status_code=403, detail="You are blocked from this project.")
     if actor_id not in project["members"]:
         project["members"].append(actor_id)
         contributor_names = project.setdefault("contributor_names", {})
@@ -695,7 +807,7 @@ async def join_project(req: JoinProjectRequest, request: Request, _claims: dict 
     if joined and _notification_settings(project)["member_joined"]:
         send_member_joined(project["name"], project["owner_id"], contributor_names.get(actor_id, actor_id))
 
-    return _project_response(project, request)
+    return _project_response(project, request, actor_id)
 
 
 @router.post("/{project_id}/uploads", status_code=201)
@@ -708,6 +820,9 @@ async def add_upload(project_id: str, req: AddUploadRequest, request: Request, _
     project = _projects.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
+
+    if actor_id in (project.get("blocked_users") or []):
+        raise HTTPException(status_code=403, detail="You are blocked from this project.")
 
     _ensure_member(project, actor_id)
 
@@ -727,7 +842,7 @@ async def add_upload(project_id: str, req: AddUploadRequest, request: Request, _
     if actor_id != project["owner_id"] and _notification_settings(project)["angle_uploaded"]:
         send_angle_uploaded(project["name"], project["owner_id"], req.user_name or actor_id, len(req.files))
 
-    return _project_response(project, request)
+    return _project_response(project, request, actor_id)
 
 
 @router.patch("/{project_id}/notification-settings")
@@ -741,11 +856,12 @@ async def update_notification_settings(
     project = _projects.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
-    _ensure_owner(project, principal_id_from_claims(_claims))
+    actor_id = principal_id_from_claims(_claims)
+    _ensure_owner(project, actor_id)
     project["notification_settings"] = req.model_dump()
     project["updated_at"] = _now()
     _persist_store()
-    return _project_response(project, request)
+    return _project_response(project, request, actor_id)
 
 
 @router.patch("/{project_id}/discovery-settings")
@@ -754,7 +870,8 @@ async def update_discovery_settings(project_id: str, req: DiscoverySettingsReque
     project = _projects.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
-    _ensure_owner(project, principal_id_from_claims(_claims))
+    actor_id = principal_id_from_claims(_claims)
+    _ensure_owner(project, actor_id)
     if req.discoverable:
         label = (req.public_label or "").strip()
         if len(label) < 8:
@@ -766,7 +883,7 @@ async def update_discovery_settings(project_id: str, req: DiscoverySettingsReque
     project["discovery_settings"] = req.model_dump(mode="json")
     project["updated_at"] = _now()
     _persist_store()
-    return _project_response(project, request)
+    return _project_response(project, request, actor_id)
 
 
 @router.get("/{project_id}/join-requests")
@@ -775,7 +892,8 @@ async def list_join_requests(project_id: str, _claims: dict = Depends(require_au
     project = _projects.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
-    _ensure_owner(project, principal_id_from_claims(_claims))
+    actor_id = principal_id_from_claims(_claims)
+    _ensure_owner(project, actor_id)
     return {"requests": project.get("join_requests", [])}
 
 
@@ -785,7 +903,8 @@ async def decide_join_request(project_id: str, request_id: str, req: JoinRequest
     project = _projects.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found.")
-    _ensure_owner(project, principal_id_from_claims(_claims))
+    actor_id = principal_id_from_claims(_claims)
+    _ensure_owner(project, actor_id)
     if req.decision not in {"approved", "declined"}:
         raise HTTPException(status_code=422, detail="Decision must be approved or declined.")
     join_request = next((item for item in project.get("join_requests", []) if item.get("request_id") == request_id), None)
@@ -796,11 +915,13 @@ async def decide_join_request(project_id: str, request_id: str, req: JoinRequest
     join_request["status"] = req.decision
     join_request["decided_at"] = _now()
     if req.decision == "approved" and join_request["requester_id"] not in project["members"]:
+        if join_request["requester_id"] in (project.get("blocked_users") or []):
+            raise HTTPException(status_code=409, detail="This contributor has been blocked from the project.")
         project["members"].append(join_request["requester_id"])
         project.setdefault("contributor_names", {}).setdefault(join_request["requester_id"], join_request["display_name"])
     project["updated_at"] = _now()
     _persist_store()
-    return _project_response(project, request)
+    return _project_response(project, request, actor_id)
 
 
 # ---------------------------------------------------------------------------

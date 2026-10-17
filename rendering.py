@@ -24,7 +24,9 @@ import os
 import subprocess
 import platform
 import shutil
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from math import cos, isfinite, pi, sin, sqrt
+from typing import Callable, Dict, List, Optional, Tuple
 from multicam_pipeline.multicam_cutter import CutSegment, assign_transition_themes
 
 
@@ -34,6 +36,234 @@ from multicam_pipeline.multicam_cutter import CutSegment, assign_transition_them
 DECODE_THREADS_PER_INPUT = max(1, int(os.environ.get("RENDER_DECODE_THREADS", "1")))
 FILTER_THREADS = max(1, int(os.environ.get("RENDER_FILTER_THREADS", "2")))
 ENCODE_THREADS = max(1, int(os.environ.get("RENDER_ENCODE_THREADS", "4")))
+
+
+@dataclass
+class AudioSpan:
+    start_time: float
+    end_time: float
+    source_path: Optional[str]
+    offset: float = 0.0
+
+
+@dataclass(frozen=True)
+class AudioMixSettings:
+    transition_seconds: float = 0.75
+    supporting_gain: float = 0.18
+    supporting_pan: float = 0.5
+
+    def __post_init__(self) -> None:
+        if not isfinite(self.transition_seconds) or self.transition_seconds < 0:
+            raise ValueError("transition_seconds must be finite and nonnegative.")
+        if not isfinite(self.supporting_gain) or not 0 <= self.supporting_gain <= 0.5:
+            raise ValueError("supporting_gain must be between zero and 0.5.")
+        if not isfinite(self.supporting_pan) or not 0 <= self.supporting_pan <= 1:
+            raise ValueError("supporting_pan must be between zero and one.")
+
+
+@dataclass(frozen=True)
+class AudioMixTransition:
+    start_time: float
+    end_time: float
+    outgoing: str
+    incoming: str
+
+
+@dataclass
+class AudioMixPlan:
+    start_time: float
+    end_time: float
+    master_path: str
+    source_offsets: Dict[str, float]
+    source_durations: Dict[str, float]
+    primary_spans: List[AudioSpan]
+    transitions: List[AudioMixTransition]
+    settings: AudioMixSettings
+
+
+def build_audio_mix_plan(
+    start_time: float,
+    end_time: float,
+    master_path: str,
+    source_offsets: Dict[str, float],
+    source_durations: Dict[str, float],
+    quality_scores: Dict[str, float],
+    settings: Optional[AudioMixSettings] = None,
+) -> AudioMixPlan:
+    if not isfinite(start_time) or not isfinite(end_time) or end_time <= start_time:
+        raise ValueError("The mix must have a finite, positive timeline duration.")
+    if any(not isfinite(offset) or not isfinite(source_durations.get(path, 0.0)) for path, offset in source_offsets.items()):
+        raise ValueError("Mix source offsets and durations must be finite.")
+    settings = settings or AudioMixSettings()
+    primary_spans = build_audio_spans(start_time, end_time, master_path, source_offsets, source_durations, quality_scores)
+    transitions: List[AudioMixTransition] = []
+    for previous, following in zip(primary_spans, primary_spans[1:]):
+        if previous.source_path is None or following.source_path is None:
+            continue
+        overlap_start = max(
+            source_offsets[previous.source_path], source_offsets[following.source_path],
+            (previous.start_time + previous.end_time) / 2,
+        )
+        overlap_end = min(
+            source_offsets[previous.source_path] + source_durations[previous.source_path],
+            source_offsets[following.source_path] + source_durations[following.source_path],
+            (following.start_time + following.end_time) / 2,
+        )
+        duration = min(settings.transition_seconds, overlap_end - overlap_start)
+        if duration <= 1e-6:
+            continue
+        start = min(max(previous.end_time - duration / 2, overlap_start), overlap_end - duration)
+        transitions.append(AudioMixTransition(start, start + duration, previous.source_path, following.source_path))
+    return AudioMixPlan(
+        start_time, end_time, master_path, dict(source_offsets), dict(source_durations),
+        primary_spans, transitions, settings,
+    )
+
+
+def audio_mix_levels(plan: AudioMixPlan, time: float) -> Dict[str, Tuple[float, float]]:
+    if time < plan.start_time or time >= plan.end_time:
+        return {}
+    available = [
+        path for path, offset in plan.source_offsets.items()
+        if offset <= time < offset + plan.source_durations.get(path, 0.0)
+    ]
+    supporting_paths = [path for path in sorted(plan.source_offsets) if path != plan.master_path]
+    sides = {path: -1 if index % 2 == 0 else 1 for index, path in enumerate(supporting_paths)}
+    supporting_gain = plan.settings.supporting_gain / sqrt(max(1, len(available) - 1))
+    pan_strength = min(plan.settings.supporting_pan, 0.5) if len(available) >= 3 else plan.settings.supporting_pan
+    levels: Dict[str, Tuple[float, float]] = {}
+    for path in available:
+        weight = float(any(span.source_path == path and span.start_time <= time < span.end_time for span in plan.primary_spans))
+        for transition in plan.transitions:
+            if transition.start_time <= time <= transition.end_time:
+                progress = (time - transition.start_time) / (transition.end_time - transition.start_time)
+                if path == transition.outgoing:
+                    weight = cos(progress * pi / 2)
+                elif path == transition.incoming:
+                    weight = sin(progress * pi / 2)
+        gain = sqrt(weight * weight + supporting_gain * supporting_gain * (1 - weight * weight))
+        pan = sides.get(path, 0) * pan_strength * (1 - weight)
+        levels[path] = (gain, pan)
+    return levels
+
+
+def _mix_weight_expression(plan: AudioMixPlan, path: str, clock: str) -> str:
+    expression = "0"
+    for span in plan.primary_spans:
+        if span.source_path == path:
+            expression = f"if(gte({clock},{span.start_time:.9f})*lt({clock},{span.end_time:.9f}),1,{expression})"
+    for transition in plan.transitions:
+        if path not in (transition.outgoing, transition.incoming):
+            continue
+        progress = f"(({clock}-{transition.start_time:.9f})/{transition.end_time - transition.start_time:.9f})"
+        curve = "cos" if path == transition.outgoing else "sin"
+        expression = (
+            f"if(between({clock},{transition.start_time:.9f},{transition.end_time:.9f}),"
+            f"{curve}({progress}*PI/2),{expression})"
+        )
+    return expression
+
+
+def _build_audio_mix_filtergraph(
+    plan: AudioMixPlan,
+    start_time: float,
+    end_time: float,
+    source_indices: Dict[str, int],
+    normalized_audio_alias: Callable[[int], str],
+) -> List[str]:
+    if start_time < plan.start_time - 1e-6 or end_time > plan.end_time + 1e-6:
+        raise ValueError("The audio mix plan must cover the rendered timeline.")
+    lines: List[str] = []
+    labels: List[str] = []
+    paths = [path for path in sorted(plan.source_offsets) if path != plan.master_path]
+    sides = {path: -1 if index % 2 == 0 else 1 for index, path in enumerate(paths)}
+    total_duration = end_time - start_time
+    for source_index, path in enumerate(sorted(plan.source_offsets)):
+        offset = plan.source_offsets[path]
+        body_start = max(start_time, offset)
+        body_end = min(end_time, offset + plan.source_durations.get(path, 0.0))
+        if body_end <= body_start:
+            continue
+        clock = f"(t+{body_start:.9f})"
+        weight = _mix_weight_expression(plan, path, clock)
+        active_count = "+".join(
+            f"(gte({clock},{source_offset:.9f})*lt({clock},{source_offset + plan.source_durations.get(source_path, 0.0):.9f}))"
+            for source_path, source_offset in plan.source_offsets.items()
+        )
+        supporting_gain = f"({plan.settings.supporting_gain:.9f}/sqrt(max(1,({active_count})-1)))"
+        gain = f"sqrt(pow({weight},2)+pow({supporting_gain},2)*(1-pow({weight},2)))"
+        pan_strength = f"if(gte(({active_count}),3),{min(plan.settings.supporting_pan, 0.5):.9f},{plan.settings.supporting_pan:.9f})"
+        pan = f"({sides.get(path, 0)}*({pan_strength})*(1-({weight})))"
+        angle = f"(({pan})+1)*PI/4"
+        alias = normalized_audio_alias(source_indices[path])
+        body_label = f"mix{source_index}_body"
+        lines.append(
+            f"[{alias}]atrim=start_sample={round((body_start - offset) * 44100)}:end_sample={round((body_end - offset) * 44100)},"
+            f"asetpts=N/SR/TB,pan=mono|c0=0.5*c0+0.5*c1,"
+            f"aeval=exprs='val(0)*({gain})*cos({angle})|val(0)*({gain})*sin({angle})':c=stereo"
+            f"[{body_label}]"
+        )
+        parts = []
+        for label, duration in ((f"mix{source_index}_lead", body_start - start_time), (f"mix{source_index}_tail", end_time - body_end)):
+            if duration <= 1e-6:
+                continue
+            lines.append(f"anullsrc=r=44100:cl=stereo,atrim=end_sample={round(duration * 44100)},asetpts=N/SR/TB[{label}]")
+            if label.endswith("_lead"):
+                parts.append(f"[{label}]")
+        parts.append(f"[{body_label}]")
+        if end_time - body_end > 1e-6:
+            parts.append(f"[mix{source_index}_tail]")
+        label = f"mix{source_index}"
+        lines.append(
+            f"{''.join(parts)}anull[{label}]" if len(parts) == 1
+            else f"{''.join(parts)}concat=n={len(parts)}:v=0:a=1[{label}]"
+        )
+        labels.append(f"[{label}]")
+    if not labels:
+        lines.append(f"anullsrc=r=44100:cl=stereo,atrim=duration={total_duration:.9f},asetpts=PTS-STARTPTS[aout]")
+    else:
+        lines.append(
+            f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:dropout_transition=0:normalize=0,"
+            f"alimiter=limit=0.95:level=false:latency=true,asetpts=N/SR/TB,"
+            f"atrim=end_sample={round(total_duration * 44100)}[aout]"
+        )
+    return lines
+
+
+def build_audio_spans(
+    start_time: float,
+    end_time: float,
+    master_path: str,
+    source_offsets: Dict[str, float],
+    source_durations: Dict[str, float],
+    quality_scores: Dict[str, float],
+) -> List[AudioSpan]:
+    if end_time <= start_time:
+        return []
+    boundaries = {start_time, end_time}
+    for path, offset in source_offsets.items():
+        duration = source_durations.get(path, 0.0)
+        if duration > 0:
+            boundaries.add(max(start_time, min(end_time, offset)))
+            boundaries.add(max(start_time, min(end_time, offset + duration)))
+    ordered = sorted(boundaries)
+    spans: List[AudioSpan] = []
+    for start, end in zip(ordered, ordered[1:]):
+        available = [
+            path for path, offset in source_offsets.items()
+            if offset <= start + 1e-6
+            and offset + source_durations.get(path, 0.0) >= end - 1e-6
+            and source_durations.get(path, 0.0) > 0
+        ]
+        selected = master_path if master_path in available else max(
+            available, key=lambda path: quality_scores.get(path, 0.0), default=None,
+        )
+        offset = source_offsets.get(selected, 0.0) if selected else 0.0
+        if spans and spans[-1].source_path == selected and spans[-1].offset == offset:
+            spans[-1].end_time = end
+        else:
+            spans.append(AudioSpan(start, end, selected, offset))
+    return spans
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +477,9 @@ def _build_filtergraph(
     orientation_mode: str = "native",
     orientation_crop_depth: int = 100,
     source_dimensions: Optional[Dict[str, Tuple[int, int]]] = None,
+    audio_spans: Optional[List[AudioSpan]] = None,
+    audio_input_indices: Optional[Dict[str, int]] = None,
+    audio_mix_plan: Optional[AudioMixPlan] = None,
 ) -> tuple[List[str], str]:
     """
     Build the FFmpeg -filter_complex string for a concat-based multicam render.
@@ -358,76 +591,103 @@ def _build_filtergraph(
             f"[v{i}]"
         )
 
-        # Audio: pull from the designated reference input (trimmed to the
-        # master-timeline window for this segment) or fall back to the
-        # segment's own source input when no reference is set.
-        if audio_source_input_index is None:
-            own_alias = _normalized_audio_alias(src_idx)
-            filter_lines.append(
-                f"[{own_alias}]"
-                f"atrim=start={seg.source_start:.6f}:end={seg.source_end:.6f},"
-                f"asetpts=PTS-STARTPTS[a{i}]"
-            )
+        if audio_source_input_index is not None or audio_spans is not None or audio_mix_plan is not None:
             continue
 
-        seg_duration = max(0.0, seg.duration)
-        src_start = seg.start_time - audio_source_offset
-        src_end = seg.end_time - audio_source_offset
+        own_alias = _normalized_audio_alias(src_idx)
+        filter_lines.append(
+            f"[{own_alias}]"
+            f"atrim=start={seg.source_start:.6f}:end={seg.source_end:.6f},"
+            f"asetpts=PTS-STARTPTS[a{i}]"
+        )
 
-        overlap_start = max(0.0, src_start)
-        overlap_end = src_end if audio_source_duration is None else min(src_end, audio_source_duration)
-        body_duration = max(0.0, overlap_end - overlap_start)
-
-        lead_silence = max(0.0, -src_start)
-        if lead_silence > seg_duration:
-            lead_silence = seg_duration
-
-        trail_silence = max(0.0, seg_duration - lead_silence - body_duration)
-
-        parts: List[str] = []
-
-        if lead_silence > 0.0005:
-            lead_label = f"a{i}_lead"
+    if audio_mix_plan is not None:
+        concat_inputs = "".join(f"[v{i}]" for i in range(n))
+        filter_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=0[vout]")
+        filter_lines.extend(_build_audio_mix_filtergraph(
+            audio_mix_plan, segments[0].start_time, segments[-1].end_time,
+            audio_input_indices or {}, _normalized_audio_alias,
+        ))
+    elif audio_spans is not None:
+        if not audio_spans:
+            raise ValueError("The audio plan must cover the rendered timeline.")
+        concat_inputs = "".join(f"[v{i}]" for i in range(n))
+        filter_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=0[vout]")
+        source_spans: Dict[str, List[int]] = {}
+        for span_index, span in enumerate(audio_spans):
+            if span.source_path is not None:
+                source_spans.setdefault(span.source_path, []).append(span_index)
+        span_aliases: Dict[int, str] = {}
+        for path, indices in source_spans.items():
+            alias = _normalized_audio_alias((audio_input_indices or {})[path])
+            if len(indices) == 1:
+                span_aliases[indices[0]] = alias
+            else:
+                aliases = [f"aspan{index}_source" for index in indices]
+                filter_lines.append(f"[{alias}]asplit={len(aliases)}" + "".join(f"[{name}]" for name in aliases))
+                span_aliases.update(dict(zip(indices, aliases)))
+        for span_index, span in enumerate(audio_spans):
+            duration = span.end_time - span.start_time
+            if span.source_path is None:
+                filter_lines.append(
+                    f"anullsrc=r=44100:cl=stereo,atrim=duration={duration:.6f},"
+                    f"asetpts=PTS-STARTPTS[aspan{span_index}]"
+                )
+            else:
+                filter_lines.append(
+                    f"[{span_aliases[span_index]}]"
+                    f"atrim=start={span.start_time - span.offset:.6f}:end={span.end_time - span.offset:.6f},"
+                    f"asetpts=PTS-STARTPTS[aspan{span_index}]"
+                )
+        audio_inputs = "".join(f"[aspan{index}]" for index in range(len(audio_spans)))
+        filter_lines.append(
+            f"{audio_inputs}anull[aout]" if len(audio_spans) == 1
+            else f"{audio_inputs}concat=n={len(audio_spans)}:v=0:a=1[aout]"
+        )
+    elif audio_source_input_index is None:
+        concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
+        filter_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=1[vout][aout]")
+    else:
+        concat_inputs = "".join(f"[v{i}]" for i in range(n))
+        filter_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=0[vout]")
+        timeline_start = segments[0].start_time
+        timeline_end = segments[-1].end_time
+        timeline_duration = timeline_end - timeline_start
+        source_start = max(0.0, timeline_start - audio_source_offset)
+        source_end = timeline_end - audio_source_offset
+        if audio_source_duration is not None:
+            source_end = min(source_end, audio_source_duration)
+        if source_end <= source_start:
             filter_lines.append(
-                f"anullsrc=r=44100:cl=stereo,"
-                f"atrim=0:{lead_silence:.6f},"
-                f"asetpts=PTS-STARTPTS[{lead_label}]"
+                f"anullsrc=r=44100:cl=stereo,atrim=duration={timeline_duration:.6f},"
+                f"asetpts=N/SR/TB[aout]"
             )
-            parts.append(f"[{lead_label}]")
-
-        if body_duration > 0.0005:
-            body_label = f"a{i}_body"
-            ref_alias = _normalized_audio_alias(audio_source_input_index)
-            filter_lines.append(
-                f"[{ref_alias}]"
-                f"atrim=start={overlap_start:.6f}:end={overlap_end:.6f},"
-                f"asetpts=PTS-STARTPTS"
-                f"[{body_label}]"
-            )
-            parts.append(f"[{body_label}]")
-
-        if trail_silence > 0.0005 or not parts:
-            tail_label = f"a{i}_tail"
-            silence_dur = trail_silence if parts else seg_duration
-            filter_lines.append(
-                f"anullsrc=r=44100:cl=stereo,"
-                f"atrim=0:{silence_dur:.6f},"
-                f"asetpts=PTS-STARTPTS[{tail_label}]"
-            )
-            parts.append(f"[{tail_label}]")
-
-        if len(parts) == 1:
-            filter_lines.append(f"{parts[0]}anull[a{i}]")
         else:
+            ref_alias = _normalized_audio_alias(audio_source_input_index)
+            lead_silence = min(timeline_duration, max(0.0, audio_source_offset - timeline_start))
+            trail_silence = max(0.0, timeline_duration - lead_silence - (source_end - source_start))
+            audio_parts = []
+            if lead_silence > 0.0005:
+                filter_lines.append(
+                    f"anullsrc=r=44100:cl=stereo,atrim=duration={lead_silence:.6f},"
+                    f"asetpts=PTS-STARTPTS[master_lead]"
+                )
+                audio_parts.append("[master_lead]")
             filter_lines.append(
-                f"{''.join(parts)}concat=n={len(parts)}:v=0:a=1[a{i}]"
+                f"[{ref_alias}]atrim=start={source_start:.6f}:end={source_end:.6f},"
+                f"asetpts=PTS-STARTPTS[master_body]"
             )
-
-    # Build the concat filter input labels: [v0][a0][v1][a1]...[vN][aN]
-    concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
-    filter_lines.append(
-        f"{concat_inputs}concat=n={n}:v=1:a=1[vout][aout]"
-    )
+            audio_parts.append("[master_body]")
+            if trail_silence > 0.0005:
+                filter_lines.append(
+                    f"anullsrc=r=44100:cl=stereo,atrim=duration={trail_silence:.6f},"
+                    f"asetpts=PTS-STARTPTS[master_tail]"
+                )
+                audio_parts.append("[master_tail]")
+            if len(audio_parts) == 1:
+                filter_lines.append(f"{audio_parts[0]}anull[aout]")
+            else:
+                filter_lines.append(f"{''.join(audio_parts)}concat=n={len(audio_parts)}:v=0:a=1[aout]")
 
     return filter_lines, "[vout][aout]"
 
@@ -450,6 +710,8 @@ def build_ffmpeg_command(
     orientation_mode: str = "native",
     orientation_crop_depth: int = 100,
     source_dimensions: Optional[Dict[str, Tuple[int, int]]] = None,
+    audio_spans: Optional[List[AudioSpan]] = None,
+    audio_mix_plan: Optional[AudioMixPlan] = None,
 ) -> List[str]:
     """
     Construct the full FFmpeg subprocess command list for a multicam render.
@@ -473,6 +735,8 @@ def build_ffmpeg_command(
         List of strings representing the complete FFmpeg command,
         ready to pass to subprocess.run().
     """
+    if audio_mix_plan is not None and audio_spans is not None:
+        raise ValueError("Choose an audio mix plan or an unmixed audio span plan, not both.")
     cmd: List[str] = ["ffmpeg", "-y"]
 
     # --- Input section ---
@@ -484,13 +748,22 @@ def build_ffmpeg_command(
         if seg.source_video_path not in seen:
             seen[seg.source_video_path] = len(unique_sources)
             unique_sources.append(seg.source_video_path)
+    for span in audio_spans or []:
+        if span.source_path is not None and span.source_path not in seen:
+            seen[span.source_path] = len(unique_sources)
+            unique_sources.append(span.source_path)
+    if audio_mix_plan is not None:
+        for path, offset in audio_mix_plan.source_offsets.items():
+            if offset < segments[-1].end_time and offset + audio_mix_plan.source_durations.get(path, 0.0) > segments[0].start_time and path not in seen:
+                seen[path] = len(unique_sources)
+                unique_sources.append(path)
     source_input_indices = [seen[seg.source_video_path] for seg in segments]
 
     for path in unique_sources:
         cmd += ["-threads", str(DECODE_THREADS_PER_INPUT), "-i", path]
 
     audio_source_input_index: Optional[int] = None
-    if audio_source_path:
+    if audio_source_path and audio_spans is None and audio_mix_plan is None:
         # If the audio reference is already one of the source inputs, reuse
         # its index rather than opening the file a second time.
         if audio_source_path in seen:
@@ -512,6 +785,9 @@ def build_ffmpeg_command(
         orientation_mode=orientation_mode,
         orientation_crop_depth=orientation_crop_depth,
         source_dimensions=source_dimensions,
+        audio_spans=audio_spans,
+        audio_input_indices=seen,
+        audio_mix_plan=audio_mix_plan,
     )
     filter_complex = ";".join(filter_lines)
 
@@ -566,6 +842,8 @@ def render(
     orientation_mode: str = "native",
     orientation_crop_depth: int = 100,
     source_dimensions: Optional[Dict[str, Tuple[int, int]]] = None,
+    audio_spans: Optional[List[AudioSpan]] = None,
+    audio_mix_plan: Optional[AudioMixPlan] = None,
 ) -> str:
     """
     Render a multicam cut list to a single MP4 file.
@@ -630,6 +908,8 @@ def render(
         orientation_mode=orientation_mode,
         orientation_crop_depth=orientation_crop_depth,
         source_dimensions=source_dimensions,
+        audio_spans=audio_spans,
+        audio_mix_plan=audio_mix_plan,
     )
 
     print(f"[rendering] Starting render → {output_path}")

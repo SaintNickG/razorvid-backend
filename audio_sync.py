@@ -539,19 +539,23 @@ def _metadata_window_plan(
     creation_times: Optional[Dict[str, float]],
     durations: Optional[Dict[str, float]],
 ) -> Optional[tuple[Dict[str, float], float]]:
-    """Return per-file seek positions and a shared window when metadata is safe."""
+    """Return seek positions for timestamped clips and their shared audio window."""
     if not creation_times or not durations:
         return None
-    if any(path not in creation_times or path not in durations for path in video_paths):
+    metadata_paths = [
+        path for path in video_paths
+        if path in creation_times and path in durations
+    ]
+    if len(metadata_paths) < 2:
         return None
-    timestamps = [float(creation_times[path]) for path in video_paths]
+    timestamps = [float(creation_times[path]) for path in metadata_paths]
     if any(not np.isfinite(value) or value <= 0 for value in timestamps):
         return None
     if max(timestamps) - min(timestamps) > 4 * 60 * 60:
         return None
     anchor = max(timestamps)
-    starts = {path: max(0.0, anchor - float(creation_times[path])) for path in video_paths}
-    shared_duration = min(float(durations[path]) - starts[path] for path in video_paths)
+    starts = {path: max(0.0, anchor - float(creation_times[path])) for path in metadata_paths}
+    shared_duration = min(float(durations[path]) - starts[path] for path in metadata_paths)
     if shared_duration < 20.0:
         return None
     return starts, min(45.0, shared_duration)
@@ -615,6 +619,7 @@ def align_videos_with_reference(
     metadata_creation_times: Optional[Dict[str, float]] = None,
     video_durations: Optional[Dict[str, float]] = None,
     force_full_track_sync: bool = False,
+    failed_angles: Optional[List[dict[str, str]]] = None,
 ) -> Tuple[Dict[str, float], str] | Tuple[Dict[str, float], str, Dict[str, dict]]:
     """
     Compute audio alignment offsets and return the selected master reference path.
@@ -633,7 +638,12 @@ def align_videos_with_reference(
     if len(video_paths) < 2:
         raise ValueError("At least 2 video paths are required for alignment.")
 
-    print(f"[audio_sync] Extracting audio from {len(video_paths)} videos...")
+    analysis_paths = list(video_paths)
+    if preferred_reference_path and preferred_reference_path not in analysis_paths:
+        print(f"[audio_sync] Adding external master audio source override: '{preferred_reference_path}'")
+        analysis_paths.append(preferred_reference_path)
+
+    print(f"[audio_sync] Extracting audio from {len(analysis_paths)} sources...")
 
     thresholds = _resolve_match_thresholds(event_type=event_type, cutting_strategy=cutting_strategy)
     print(
@@ -645,44 +655,159 @@ def align_videos_with_reference(
         f"peak_ratio_if_partial_support>={thresholds.min_peak_ratio_with_partial_support:.2f}"
     )
 
+    metadata_assisted_paths: set[str] = set()
+    quality_tracks: Dict[str, np.ndarray] = {}
     metadata_assisted = False
     window_plan = None if force_full_track_sync else _metadata_window_plan(video_paths, metadata_creation_times, video_durations)
     if force_full_track_sync:
         print("[audio_sync] Creator confirmed uncertain recording metadata — skipping metadata window, using full-track alignment")
+    elif window_plan and preferred_reference_path and preferred_reference_path not in window_plan[0]:
+        print("[audio_sync] Preferred audio source has no usable timestamp metadata; using full-track alignment")
+        window_plan = None
     if window_plan:
         starts, window_duration = window_plan
-        print(f"[audio_sync] Metadata assist: analyzing a shared {window_duration:.1f}s audio window")
+        metadata_paths = [path for path in video_paths if path in starts]
+        missing_metadata_paths = [path for path in video_paths if path not in starts]
+        print(
+            f"[audio_sync] Metadata assist: analyzing a shared {window_duration:.1f}s audio window "
+            f"for {len(metadata_paths)} of {len(video_paths)} clips"
+        )
         window_tracks = [
             _extract_mono_audio(path, start_seconds=starts[path], duration_seconds=window_duration)
-            for path in video_paths
+            for path in metadata_paths
         ]
-        best_attempt = _evaluate_reference_attempts(
-            video_paths,
+        quality_tracks.update(dict(zip(metadata_paths, window_tracks)))
+        metadata_attempt = _evaluate_reference_attempts(
+            metadata_paths,
             window_tracks,
             thresholds,
             preferred_reference_path,
             audio_start_offsets=starts,
         )
-        metadata_assisted = not best_attempt.weak_matches
-        if best_attempt.weak_matches:
+        if metadata_attempt.weak_matches:
             print("[audio_sync] Metadata-assisted window was inconclusive; falling back to full-track alignment")
+        else:
+            combined_offsets = dict(metadata_attempt.offsets)
+            combined_results = dict(metadata_attempt.results)
+            reference_path = metadata_attempt.reference.path
+            reference_audio = None
+
+            for path in missing_metadata_paths:
+                if reference_audio is None:
+                    reference_audio = _extract_mono_audio(reference_path)
+                    quality_tracks[reference_path] = reference_audio
+                audio = _extract_mono_audio(path)
+                quality_tracks[path] = audio
+                pair_attempt = _compute_offsets_for_reference(
+                    [reference_path, path],
+                    [reference_audio, audio],
+                    AudioReferenceChoice(reference_path, 0, metadata_attempt.reference.score),
+                    thresholds,
+                )
+                if pair_attempt.weak_matches:
+                    print(
+                        f"[audio_sync] Full-track match for a clip without timestamp metadata was inconclusive; "
+                        "falling back to full-track alignment for all clips"
+                    )
+                    combined_offsets = {}
+                    combined_results = {}
+                    break
+                combined_offsets[path] = pair_attempt.offsets[path]
+                combined_results[path] = pair_attempt.results[path]
+
+            if combined_offsets:
+                confidences = [
+                    result.confidence
+                    for path, result in combined_results.items()
+                    if path != reference_path
+                ]
+                best_attempt = ReferenceAttempt(
+                    reference=metadata_attempt.reference,
+                    offsets=combined_offsets,
+                    results=combined_results,
+                    weak_matches=[],
+                    avg_confidence=float(np.mean(confidences)) if confidences else 1.0,
+                )
+                metadata_assisted_paths = set(metadata_paths)
+                metadata_assisted = True
 
     if not metadata_assisted:
         audio_tracks = [_extract_mono_audio(path) for path in video_paths]
-        for path, audio in zip(video_paths, audio_tracks):
+        if preferred_reference_path and preferred_reference_path not in video_paths:
+            audio_tracks.append(_extract_mono_audio(preferred_reference_path))
+        quality_tracks = dict(zip(analysis_paths, audio_tracks))
+        for path, audio in zip(analysis_paths, audio_tracks):
             print(f"[audio_sync]   full-track analyzed: '{path}' ({len(audio) / TARGET_SR:.2f}s)")
         best_attempt = _evaluate_reference_attempts(
-            video_paths,
+            analysis_paths,
             audio_tracks,
             thresholds,
             preferred_reference_path,
         )
 
-    offsets = best_attempt.offsets
+    offsets = {
+        path: value
+        for path, value in best_attempt.offsets.items()
+        if path in video_paths
+    }
     weak_matches = best_attempt.weak_matches
     reference = best_attempt.reference
 
     if weak_matches:
+        weak_video_paths = list(dict.fromkeys(
+            path for path, *_metrics in weak_matches if path in video_paths
+        ))
+        remaining_video_paths = [path for path in video_paths if path not in weak_video_paths]
+        for path, _delay, confidence, peak_ratio, agreement_std, modality_support in weak_matches:
+            if failed_angles is None or path not in video_paths:
+                continue
+            reasons = []
+            if confidence < thresholds.min_confidence:
+                reasons.append(f"confidence {confidence:.3f} below {thresholds.min_confidence:.3f}")
+            peak_threshold = (
+                thresholds.min_peak_ratio_with_partial_support
+                if modality_support == thresholds.min_modality_support
+                else thresholds.min_peak_ratio
+            )
+            if peak_ratio < peak_threshold:
+                reasons.append(f"peak ratio {peak_ratio:.2f} below {peak_threshold:.2f}")
+            if agreement_std > thresholds.max_agreement_std_seconds:
+                reasons.append(
+                    f"agreement spread {agreement_std:.3f}s above "
+                    f"{thresholds.max_agreement_std_seconds:.3f}s"
+                )
+            if modality_support < thresholds.min_modality_support:
+                reasons.append(
+                    f"only {modality_support} matching signal feature(s), "
+                    f"{thresholds.min_modality_support} required"
+                )
+            reason = "Audio sync was unreliable: " + "; ".join(reasons) + "."
+            failed_angles.append({
+                "file": os.path.basename(path),
+                "reason": reason,
+                "category": "sync",
+            })
+
+        if (
+            len(weak_video_paths) == len(weak_matches)
+            and weak_video_paths
+            and len(remaining_video_paths) >= 2
+        ):
+            retry_reference = preferred_reference_path
+            if retry_reference in video_paths and retry_reference not in remaining_video_paths:
+                retry_reference = None
+            return align_videos_with_reference(
+                remaining_video_paths,
+                preferred_reference_path=retry_reference,
+                event_type=event_type,
+                cutting_strategy=cutting_strategy,
+                include_diagnostics=include_diagnostics,
+                metadata_creation_times=metadata_creation_times,
+                video_durations=video_durations,
+                force_full_track_sync=force_full_track_sync,
+                failed_angles=failed_angles,
+            )
+
         mismatch_lines = [
             "AUDIO_MATCH_FAILED: One or more videos did not produce a reliable full-track audio match.",
             f"Reference: {reference.path}",
@@ -712,7 +837,8 @@ def align_videos_with_reference(
                 "agreement_std_seconds": round(result.agreement_std_seconds, 4),
                 "agreement_support": round(result.agreement_support, 3),
                 "modality_support": result.modality_support,
-                "metadata_assisted": metadata_assisted,
+                "metadata_assisted": path in metadata_assisted_paths,
+                "audio_quality_score": round(_audio_quality_score(quality_tracks[path], max_length=max(1, len(quality_tracks[path]))), 6),
             }
             for path, result in best_attempt.results.items()
         }

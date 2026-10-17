@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from multicam_pipeline.auth import require_admin
 from multicam_pipeline.billing_store import billing_backend_health
 from multicam_pipeline.config import AWS_REGION, DYNAMODB_TABLE, IS_AWS
-from multicam_pipeline.job_schema import CuttingStrategy, EffectIntensity, EventType, MulticamJob
+from multicam_pipeline.job_schema import CuttingStrategy, EffectIntensity, EventType, MulticamJob, OrientationMode
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -196,11 +196,18 @@ async def review_media(_claims: dict = Depends(require_admin)):
 
         renders = []
         for job in sorted(jobs_by_project.get(project.get("project_id"), []), key=lambda item: item.get("created_at", ""), reverse=True):
+            output_paths = job.get("output_parts") or [job.get("output_path", "")]
+            output_urls = [
+                _presigned_review_url(path)
+                for path in output_paths
+                if path and job.get("status") == "COMPLETE"
+            ]
             renders.append({
                 "job_id": job.get("job_id"),
                 "status": job.get("status"),
                 "created_at": job.get("created_at"),
-                "output_url": _presigned_review_url(job.get("output_path", "")) if job.get("status") == "COMPLETE" else None,
+                "output_url": output_urls[0] if output_urls else None,
+                "output_urls": output_urls,
                 "sync_diagnostics": job.get("sync_diagnostics"),
             })
 
@@ -238,9 +245,15 @@ async def retry_failed_job(job_id: str, _claims: dict = Depends(require_admin)):
         cutting_strategy=CuttingStrategy(existing.get("cutting_strategy", "local")),
         event_type=EventType(existing.get("event_type", "cheer")),
         effect_intensity=EffectIntensity(existing.get("effect_intensity", "balanced")),
+        transition_style=str(existing.get("transition_style", "cut")),
+        orientation_mode=OrientationMode(existing.get("orientation_mode", "auto")),
+        orientation_crop_depth=int(existing.get("orientation_crop_depth", 100)),
         rekognition_sample_rate=int(existing.get("rekognition_sample_rate", 15)),
         audio_source_override=existing.get("audio_source_override"),
         project_id=existing.get("project_id"),
+        max_duration=float(existing.get("max_duration", 240.0)),
+        auto_split=bool(existing.get("auto_split", True)),
+        force_full_track_sync=bool(existing.get("force_full_track_sync", False)),
     )
 
     if IS_AWS:

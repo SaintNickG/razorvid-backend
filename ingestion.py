@@ -8,8 +8,9 @@ Handles uploaded video file validation and metadata extraction
 import subprocess
 import json
 import os
+from math import isfinite
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 # Minimum short-side resolution (px) for a file to count as a real camera
@@ -39,6 +40,8 @@ class VideoMetadata:
     height: int
     audio_channels: int
     creation_time: Optional[float] = None
+    video_duration: Optional[float] = None
+    audio_duration: Optional[float] = None
 
     @property
     def has_audio(self) -> bool:
@@ -96,6 +99,42 @@ def _parse_fps(fps_str: str) -> float:
     return float(fps_str)
 
 
+def _parse_creation_time(tags: dict) -> Optional[float]:
+    """Parse common container/camera capture-time tags as a UTC Unix timestamp."""
+    tag_names = {
+        "creation_time",
+        "com.apple.quicktime.creationdate",
+        "creationdate",
+        "creation_date",
+        "date_time_original",
+    }
+    for key, value in (tags or {}).items():
+        if str(key).casefold() not in tag_names or not value:
+            continue
+        text = str(value).strip()
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except (TypeError, ValueError, OverflowError):
+            try:
+                timestamp = float(text)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if timestamp > 0:
+                return timestamp
+    return None
+
+
+def _stream_duration(stream: dict, fallback: float) -> float:
+    try:
+        duration = float(stream.get("duration"))
+        return duration if isfinite(duration) and duration >= 0 else fallback
+    except (TypeError, ValueError):
+        return fallback
+
+
 def extract_metadata(video_path: str) -> VideoMetadata:
     """
     Extract metadata from a video file using FFprobe.
@@ -145,16 +184,10 @@ def extract_metadata(video_path: str) -> VideoMetadata:
     audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
     audio_channels = int(audio_stream.get("channels", 0)) if audio_stream else 0
 
-    creation_time = None
-    creation_value = (
-        fmt.get("tags", {}).get("creation_time")
-        or video_stream.get("tags", {}).get("creation_time")
+    creation_time = (
+        _parse_creation_time(fmt.get("tags", {}))
+        or _parse_creation_time(video_stream.get("tags", {}))
     )
-    if creation_value:
-        try:
-            creation_time = datetime.fromisoformat(str(creation_value).replace("Z", "+00:00")).timestamp()
-        except (TypeError, ValueError):
-            creation_time = None
 
     return VideoMetadata(
         path=video_path,
@@ -164,10 +197,15 @@ def extract_metadata(video_path: str) -> VideoMetadata:
         height=height,
         audio_channels=audio_channels,
         creation_time=creation_time,
+        video_duration=_stream_duration(video_stream, duration),
+        audio_duration=_stream_duration(audio_stream, duration) if audio_stream else 0.0,
     )
 
 
-def validate_and_ingest(video_paths: List[str]) -> List[VideoMetadata]:
+def validate_and_ingest(
+    video_paths: List[str],
+    failed_angles: Optional[List[dict[str, str]]] = None,
+) -> List[VideoMetadata]:
     """
     Validate and extract metadata for a list of uploaded video files.
 
@@ -190,26 +228,43 @@ def validate_and_ingest(video_paths: List[str]) -> List[VideoMetadata]:
         List of VideoMetadata objects, one per valid input file.
 
     Raises:
-        ValueError: If any file fails validation.
+        ValueError: If fewer than 2 usable angles remain after validation.
     """
     if not video_paths:
         raise ValueError("No video paths provided.")
 
     results: List[VideoMetadata] = []
     low_res_skips: List[tuple[str, str]] = []  # (path, resolution) for each excluded file
+    failures = failed_angles if failed_angles is not None else []
 
     for path in video_paths:
         print(f"[ingestion] Ingesting '{path}'...")
 
-        meta = extract_metadata(path)
+        try:
+            meta = extract_metadata(path)
+        except Exception as exc:
+            reason = str(exc).replace(path, os.path.basename(path)).replace("\n", "; ").strip()
+            failures.append({
+                "file": os.path.basename(path),
+                "reason": reason[:500] or "Video metadata could not be read.",
+                "category": "validation",
+            })
+            print(f"[ingestion]   ✗ excluding unreadable file '{path}': {reason}")
+            continue
 
         # Validation checks
         if meta.duration <= 1.0:
-            raise ValueError(f"'{path}' is too short ({meta.duration:.2f}s). Minimum is 1s.")
+            reason = f"Clip is too short ({meta.duration:.2f}s); minimum is 1s."
+            failures.append({"file": os.path.basename(path), "reason": reason, "category": "validation"})
+            continue
         if not meta.has_audio:
-            raise ValueError(f"'{path}' has no audio stream. Audio is required for sync.")
+            reason = "No audio track; audio is required to synchronize this angle."
+            failures.append({"file": os.path.basename(path), "reason": reason, "category": "validation"})
+            continue
         if meta.fps <= 0:
-            raise ValueError(f"'{path}' has invalid FPS: {meta.fps}")
+            reason = f"No valid frame rate was found ({meta.fps} FPS)."
+            failures.append({"file": os.path.basename(path), "reason": reason, "category": "validation"})
+            continue
         if min(meta.width, meta.height) < MIN_VIDEO_SHORT_SIDE_PX:
             # Note: this is frequently *real* footage that was auto-compressed
             # during sharing (iMessage/SMS, some cloud links) rather than an
@@ -217,6 +272,11 @@ def validate_and_ingest(video_paths: List[str]) -> List[VideoMetadata]:
             # which cause it is.
             print(f"[ingestion]   ✗ excluding low-resolution file ({meta.resolution}): '{path}'")
             low_res_skips.append((path, meta.resolution))
+            failures.append({
+                "file": os.path.basename(path),
+                "reason": f"Resolution {meta.resolution} is below the {MIN_VIDEO_SHORT_SIDE_PX}px minimum.",
+                "category": "low_resolution",
+            })
             continue
 
         print(
@@ -243,7 +303,10 @@ def validate_and_ingest(video_paths: List[str]) -> List[VideoMetadata]:
                 f"instead of a shared/forwarded copy."
             )
         raise ValueError(base_reason)
-    if not results:
-        raise ValueError("No usable video files after validation.")
+    if len(results) < 2:
+        details = "; ".join(f"{item['file']}: {item['reason']}" for item in failures)
+        raise ValueError(
+            f"Only {len(results)} usable angle(s) remain after validation; at least 2 are required. {details}"
+        )
 
     return results

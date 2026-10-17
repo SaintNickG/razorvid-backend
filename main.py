@@ -38,6 +38,8 @@ from multicam_pipeline.routers import (
     billing_router,
     admin_router,
     feedback_router,
+    account_router,
+    moderation_router,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -144,6 +146,8 @@ app.include_router(contributions_router)  # GET /api/project/{project}/render/{r
 app.include_router(billing_router)  # Stripe checkout + webhook + billing status
 app.include_router(admin_router)  # Failed-job observability and retry operations
 app.include_router(feedback_router)  # Beta feedback submissions
+app.include_router(account_router)  # DELETE /account
+app.include_router(moderation_router)  # Project reports and scoped member blocks
 
 # ---------------------------------------------------------------------------
 # Frontend upload form — served at /

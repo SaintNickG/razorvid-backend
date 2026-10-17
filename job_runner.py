@@ -52,7 +52,7 @@ _executor = ProcessPoolExecutor(max_workers=4)
 # Core pipeline runner (runs in a subprocess worker)
 # ---------------------------------------------------------------------------
 
-def _run_pipeline_sync(job_dict: dict) -> tuple[str, str, list[str]]:
+def _run_pipeline_sync(job_dict: dict) -> tuple[str, list[str], str, list[str], list[dict[str, str]], str | None]:
     """
     Execute the full multicam pipeline synchronously.
 
@@ -70,7 +70,7 @@ def _run_pipeline_sync(job_dict: dict) -> tuple[str, str, list[str]]:
         job_dict: Serialized MulticamJob dict from MulticamJob.to_dict().
 
     Returns:
-        Tuple of (output_path, selected_audio_source_path, excluded_low_quality_files).
+        Tuple of output data, excluded files, angle failures, and an optional pipeline error.
 
     Raises:
         Any exception from the pipeline propagates back to the asyncio caller.
@@ -83,11 +83,28 @@ def _run_pipeline_sync(job_dict: dict) -> tuple[str, str, list[str]]:
 
     print(f"[job_runner] Starting job {job.job_id}")
 
-    output = run_multicam_job(job)
+    try:
+        output = run_multicam_job(job)
+    except Exception as exc:
+        return (
+            "",
+            [],
+            job.selected_audio_source_path or "",
+            job.excluded_low_quality_files,
+            job.angle_failures,
+            f"{type(exc).__name__}: {exc}",
+        )
     selected_audio_source_path = job.selected_audio_source_path or ""
 
     print(f"[job_runner] Job {job.job_id} complete → {output}")
-    return output, selected_audio_source_path, job.excluded_low_quality_files
+    return (
+        output,
+        job.output_parts or [output],
+        selected_audio_source_path,
+        job.excluded_low_quality_files,
+        job.angle_failures,
+        None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -110,14 +127,21 @@ async def _execute_job(job: MulticamJob) -> None:
     try:
         # Offload the blocking pipeline to a process pool worker.
         # run_in_executor bridges asyncio and the ProcessPoolExecutor.
-        output_path, selected_audio_source_path, excluded_low_quality_files = await loop.run_in_executor(
+        output_path, output_parts, selected_audio_source_path, excluded_low_quality_files, angle_failures, pipeline_error = await loop.run_in_executor(
             _executor,
             _run_pipeline_sync,
             job.to_dict(),  # pass as plain dict — must be picklable
         )
         job.output_path = output_path
+        job.output_parts = output_parts
+        job.total_parts = len(output_parts)
         job.selected_audio_source_path = selected_audio_source_path
         job.excluded_low_quality_files = excluded_low_quality_files
+        job.angle_failures = angle_failures
+        if pipeline_error:
+            job.mark_failed(pipeline_error)
+            print(f"[job_runner] Job {job.job_id} FAILED: {pipeline_error}")
+            return
         job.mark_complete()
 
     except Exception as exc:

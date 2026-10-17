@@ -82,19 +82,19 @@ def purge_expired_renders() -> dict:
 
     for item in expired:
         job_id = item.get("job_id")
-        output_path = item.get("output_path")
-        if not job_id or not output_path:
+        output_paths = [path for path in (item.get("output_parts") or [item.get("output_path")]) if path]
+        if not job_id or not output_paths:
             continue
 
         try:
-            bucket, key = _parse_s3_uri(output_path)
-        except ValueError:
-            bucket, key = _output_bucket, f"{job_id}/output.mp4"
-
-        try:
-            s3.delete_object(Bucket=bucket, Key=key)
+            for output_path in output_paths:
+                try:
+                    bucket, key = _parse_s3_uri(output_path)
+                except ValueError:
+                    bucket, key = _output_bucket, f"{job_id}/output.mp4"
+                s3.delete_object(Bucket=bucket, Key=key)
         except Exception as exc:
-            print(f"[reaper] Failed to delete expired output for {job_id}: {exc}")
+            print(f"[reaper] Failed to delete expired output part for {job_id}: {exc}")
             continue
 
         _table.update_item(
@@ -102,7 +102,7 @@ def purge_expired_renders() -> dict:
             UpdateExpression="SET output_purged = :p, output_purged_at = :t",
             ExpressionAttributeValues={":p": True, ":t": now_iso},
         )
-        print(f"[reaper] Purged expired render output: {job_id} (expired {item.get('expires_at')})")
+        print(f"[reaper] Purged expired render output part(s): {job_id} (expired {item.get('expires_at')})")
         purged.append(job_id)
 
     print(f"[reaper] Done. Purged {len(purged)} expired render output(s).")

@@ -15,7 +15,8 @@ venv/
 env/
 
 # Environment files — never bake credentials into the image
-.env
+.env*
+*.env
 
 # Test artifacts
 .pytest_cache/

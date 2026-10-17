@@ -6,6 +6,8 @@ from .contributions import router as contributions_router
 from .billing import router as billing_router
 from .admin import router as admin_router
 from .feedback import router as feedback_router
+from .account import router as account_router
+from .moderation import router as moderation_router
 
 __all__ = [
 	"upload_router",
@@ -16,4 +18,6 @@ __all__ = [
 	"billing_router",
 	"admin_router",
 	"feedback_router",
+	"account_router",
+	"moderation_router",
 ]

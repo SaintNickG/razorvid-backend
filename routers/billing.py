@@ -13,13 +13,15 @@ from typing import Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from multicam_pipeline.auth import require_auth, resolve_actor_id
+from multicam_pipeline.auth import principal_id_from_claims, require_admin, require_auth, resolve_actor_id
 from multicam_pipeline.billing_store import (
     append_billing_event,
     find_user_by_customer_id,
     get_user_billing,
     get_user_billing_quota,
     set_user_billing,
+    issue_pro_month_codes,
+    redeem_pro_month_code,
 )
 
 try:
@@ -66,6 +68,14 @@ class CreateCheckoutSessionRequest(BaseModel):
     mode: str = Field(default="subscription", pattern="^(subscription|payment)$")
 
 
+class CreateProMonthCodesRequest(BaseModel):
+    count: int = Field(default=1, ge=1, le=25)
+
+
+class RedeemPromoCodeRequest(BaseModel):
+    code: str = Field(min_length=8, max_length=64)
+
+
 @router.get("/me")
 async def get_my_billing(claims: dict = Depends(require_auth)):
     """Return billing state and current render quota for the authenticated user."""
@@ -83,6 +93,35 @@ async def get_my_quota(claims: dict = Depends(require_auth)):
     """Return render usage and remaining monthly quota for the authenticated user."""
     user_id = resolve_actor_id(claims)
     return get_user_billing_quota(user_id)
+
+
+@router.post("/admin/pro-month-codes", status_code=201)
+async def create_pro_month_codes(req: CreateProMonthCodesRequest, claims: dict = Depends(require_admin)):
+    """Issue single-use 30-day Pro Basic vouchers for manual sharing."""
+    creator_id = principal_id_from_claims(claims) or "admin"
+    try:
+        codes = issue_pro_month_codes(req.count, creator_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to create promo codes: {exc}") from exc
+    return {
+        "plan": "pro_basic",
+        "duration_days": 30,
+        "redeem_before_days": 90,
+        "codes": codes,
+    }
+
+
+@router.post("/redeem-promo")
+async def redeem_promo_code(req: RedeemPromoCodeRequest, claims: dict = Depends(require_auth)):
+    """Redeem a single-use Pro Basic voucher for the authenticated account."""
+    user_id = resolve_actor_id(claims)
+    try:
+        result = redeem_pro_month_code(req.code, user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Unable to redeem promo code right now.") from exc
+    return {"redeemed": True, **result}
 
 
 @router.post("/checkout-session")
